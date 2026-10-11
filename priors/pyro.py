@@ -34,6 +34,5 @@ def get_batch(batch_size, seq_len, batch_size_per_gp_sample=None, **config):
     return x, y, y
 
 
-DataLoader = get_batch_to_dataloader(get_batch)
-DataLoader.num_outputs = 1
+DataLoader = get_batch_to_dataloader(get_batch, default_num_outputs=1)
 

@@ -2,11 +2,12 @@ from torch.utils.data import DataLoader
 
 
 class PriorDataLoader(DataLoader):
-    pass
-    # init accepts num_steps as first argument
+    """Interface for prior data loaders consumed by `train.train`.
 
-    # has two attributes set on class or object level:
-    # num_features: int and
-    # num_outputs: int
-    # fuse_x_y: bool
-    # Optional: validate function that accepts a transformer model
+    Subclasses do not call `DataLoader.__init__`; they only implement `__len__` and `__iter__`
+    (yielding `(data, targets)` batches sampled on the fly). Required interface:
+      - `__init__(num_steps, fuse_x_y=False, **get_batch_kwargs)`
+      - attributes (class or instance level): `num_features: int`, `num_outputs: int`, `fuse_x_y: bool`
+      - optional: `validate(model)` called periodically during training
+    See `priors.utils.get_batch_to_dataloader` for the standard implementation.
+    """
