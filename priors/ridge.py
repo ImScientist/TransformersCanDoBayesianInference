@@ -15,8 +15,7 @@ def get_batch(batch_size, seq_len, num_features, noisy_std = .1):
     y = y_non_noisy + torch.normal(torch.zeros_like(y_non_noisy),noisy_std) # noisy_std is alpha
     return x, y, y_non_noisy
 
-DataLoader = get_batch_to_dataloader(get_batch)
-DataLoader.num_outputs = 1
+DataLoader = get_batch_to_dataloader(get_batch, default_num_outputs=1)
 
 
 def evaluate(x,y,y_non_noisy, alpha=0.):

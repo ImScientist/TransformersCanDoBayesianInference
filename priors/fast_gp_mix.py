@@ -144,8 +144,7 @@ def get_batch(batch_size, seq_len, num_features, device=default_device, hyperpar
     return x, sample, target_sample # x.shape = (T,B,H)
 
 
-class DataLoader(get_batch_to_dataloader(get_batch)):
-    num_outputs = 1
+class DataLoader(get_batch_to_dataloader(get_batch, default_num_outputs=1)):
     @torch.no_grad()
     def validate(self, model, step_size=1, start_pos=0):
         if isinstance(model.criterion, BarDistribution):

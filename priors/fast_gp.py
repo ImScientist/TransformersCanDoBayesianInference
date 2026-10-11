@@ -9,7 +9,6 @@ from utils import default_device
 from .utils import order_by_y, normalize_data, normalize_by_used_features_f, Binarize
 
 
-# We will use the simplest form of GP model, exact inference
 class ExactGPModel(gpytorch.models.ExactGP):
     """Exact GP with constant mean, scaled RBF kernel and Gaussian likelihood.
 
@@ -61,7 +60,8 @@ def get_model(x, y, hyperparameters):
 # WARNING: `default_device` is 'mps' on Apple Silicon. MPS has no float64 support, so GP prior sampling
 # can be numerically unstable for very small noise (e.g. noise=1e-4). If you see NotPSD/jitter
 # warnings or errors, pass device='cpu' here.
-def get_batch(batch_size, seq_len, num_features, device=default_device, hyperparameters=None, equidistant_x=False):
+def get_batch(batch_size, seq_len: int, num_features: int, device=default_device, hyperparameters=None,
+              equidistant_x=False):
     if isinstance(hyperparameters, (tuple, list)):
         hyperparameters = {
             "noise": hyperparameters[0],
@@ -75,9 +75,8 @@ def get_batch(batch_size, seq_len, num_features, device=default_device, hyperpar
             "lengthscale": .1}
 
     with gpytorch.settings.fast_computations(*hyperparameters.get('fast_computations', (True, True, True))):
-        start = time.time()
 
-        # -> (batch_size, seq_len, num_features)
+        # -> (batch_size, seq_len, num_feat)
         if equidistant_x:
             assert num_features == 1
             x = torch.linspace(0, 1, seq_len, device=device)[:, None].repeat(batch_size, 1, 1)
@@ -88,12 +87,13 @@ def get_batch(batch_size, seq_len, num_features, device=default_device, hyperpar
         model.to(device)
         # trained_model = ExactGPModel(train_x, train_y, likelihood).cuda()
         # trained_model.eval()
+
         with gpytorch.settings.prior_mode(True):
             d = model(x)
             d = likelihood(d)
             sample = d.sample().transpose(0, 1)
-        # print(f'took {time.time() - start}')
 
+    # -> (seq_len, batch_size, num_feat), (seq_len, batch_size), (seq_len, batch_size)
     return x.transpose(0, 1), sample, sample  # x.shape = (T,B,H)
 
 
@@ -116,8 +116,7 @@ def get_batch(batch_size, seq_len, num_features, device=default_device, hyperpar
 # # Append empty features if enabled
 # x = torch.cat([x, torch.zeros((x.shape[0], x.shape[1], num_features - num_features_used), device=device)], -1)
 
-DataLoader = get_batch_to_dataloader(get_batch)
-DataLoader.num_outputs = 1
+DataLoader = get_batch_to_dataloader(get_batch, default_num_outputs=1)
 
 
 def get_model_on_device(x, y, hyperparameters, device):
@@ -127,14 +126,18 @@ def get_model_on_device(x, y, hyperparameters, device):
 
 
 @torch.no_grad()
-def evaluate(x, y, y_non_noisy, use_mse=False, hyperparameters={}, get_model_on_device=get_model_on_device,
+def evaluate(x, y, y_non_noisy, use_mse=False, hyperparameters={},
+             get_model_on_device=get_model_on_device,
              device=default_device, step_size=1, start_pos=0):
     start_time = time.time()
     losses_after_t = [.0] if start_pos == 0 else []
     all_losses_after_t = []
 
-    with gpytorch.settings.fast_computations(
-            *hyperparameters.get('fast_computations', (True, True, True))), gpytorch.settings.fast_pred_var(False):
+    with (
+        gpytorch.settings.fast_computations(
+            *hyperparameters.get('fast_computations', (True, True, True))),
+        gpytorch.settings.fast_pred_var(False)
+    ):
         for t in range(max(start_pos, 1), len(x), step_size):
             loss_sum = 0.
             model, likelihood = get_model_on_device(x[:t].transpose(0, 1), y[:t].transpose(0, 1), hyperparameters,
@@ -165,8 +168,18 @@ def evaluate(x, y, y_non_noisy, use_mse=False, hyperparameters={}, get_model_on_
 
 
 if __name__ == '__main__':
-    hps = (.1, .1, .1)
+
+    hps = {"noise": .1, "outputscale": .1, "lengthscale": .1}
+    hps_eval = {'fast_computations': (True, True, True)}
+
+    # hyperparameters = (.1, .1, .1)
+
     for redo_idx in range(1):
         print(
-            evaluate(*get_batch(1000, 10, hyperparameters=hps, num_features=10),
-                     use_mse=False, hyperparameters=hps))
+            evaluate(*get_batch(batch_size=1000,
+                                seq_len=10,
+                                num_features=10,
+                                hyperparameters=hps),
+                     use_mse=False,
+                     hyperparameters=hps_eval)
+        )

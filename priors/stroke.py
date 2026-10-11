@@ -113,8 +113,7 @@ def get_batch(batch_size, seq_len, num_features=None, noisy_std=None, only_train
     target_y = torch.stack(target_y, 1)
     return x,y,target_y
 
-DataLoader = get_batch_to_dataloader(get_batch)
-DataLoader.num_outputs = 2
+DataLoader = get_batch_to_dataloader(get_batch, default_num_outputs=2)
 
 if __name__ == '__main__':
     g1, g2 = mnist_prior(2, size=3)

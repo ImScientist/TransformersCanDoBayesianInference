@@ -38,8 +38,7 @@ def get_batch(batch_size, seq_len, num_features, noisy_std=None):
     return x, y, y
 
 
-DataLoader = get_batch_to_dataloader(get_batch)
-DataLoader.num_outputs = 1
+DataLoader = get_batch_to_dataloader(get_batch, default_num_outputs=1)
 
 
 def evaluate(x, y, y_non_noisy, use_mse=False, length_scale=length_scale_sampling_gp):
