@@ -6,7 +6,6 @@ import gpytorch
 
 from .utils import get_batch_to_dataloader
 from utils import default_device
-from .utils import order_by_y, normalize_data, normalize_by_used_features_f, Binarize
 
 
 class ExactGPModel(gpytorch.models.ExactGP):
@@ -16,8 +15,9 @@ class ExactGPModel(gpytorch.models.ExactGP):
     parameter's constraint (gpytorch applies it when the constraint is registered), so no
     attributes need to be edited after initialization.
 
-    :param train_x: training inputs, shape (batch, n, num_features)
-    :param train_y: training targets, shape (batch, n); may be empty when sampling from the prior
+    :param train_x: training inputs, shape (batch, n, num_features), or None for a prior-only model
+    :param train_y: training targets, shape (batch, n), or None for a prior-only model.
+        A prior-only model must be put in eval mode (`model.eval()`) before calling it.
     :param noise: observation noise variance of the Gaussian likelihood
     :param outputscale: output scale (signal variance) of the ScaleKernel
     :param lengthscale: lengthscale of the RBF kernel (shared across features)
@@ -56,12 +56,24 @@ def get_model(x, y, hyperparameters):
     return model, model.likelihood
 
 
+def get_model_on_device(x, y, hyperparameters, device):
+    model, likelihood = get_model(x, y, hyperparameters)
+    model.to(device)
+    return model, likelihood
+
+
 @torch.no_grad()
 # WARNING: `default_device` is 'mps' on Apple Silicon. MPS has no float64 support, so GP prior sampling
 # can be numerically unstable for very small noise (e.g. noise=1e-4). If you see NotPSD/jitter
 # warnings or errors, pass device='cpu' here.
-def get_batch(batch_size, seq_len: int, num_features: int, device=default_device, hyperparameters=None,
-              equidistant_x=False):
+def get_batch(
+        batch_size,
+        seq_len: int,
+        num_features: int,
+        device=default_device,
+        hyperparameters=None,
+        equidistant_x=False
+):
     if isinstance(hyperparameters, (tuple, list)):
         hyperparameters = {
             "noise": hyperparameters[0],
@@ -83,14 +95,16 @@ def get_batch(batch_size, seq_len: int, num_features: int, device=default_device
         else:
             x = torch.rand(batch_size, seq_len, num_features, device=device)
 
-        model, likelihood = get_model(x, torch.Tensor(), hyperparameters)
+        # No training data: in eval mode the model returns the GP prior N(m(x), K(x, x)) for any x.
+        # (In train mode a model without training data would raise an error.)
+        model, likelihood = get_model(None, None, hyperparameters)
         model.to(device)
-        # trained_model = ExactGPModel(train_x, train_y, likelihood).cuda()
-        # trained_model.eval()
+        model.eval()
 
+        # prior_mode is redundant without training data, but makes the intent explicit.
         with gpytorch.settings.prior_mode(True):
-            d = model(x)
-            d = likelihood(d)
+            d = model(x)  # prior of the noise-free function f
+            d = likelihood(d)  # adds observation noise -> prior of y
             sample = d.sample().transpose(0, 1)
 
     # -> (seq_len, batch_size, num_feat), (seq_len, batch_size), (seq_len, batch_size)
@@ -119,31 +133,41 @@ def get_batch(batch_size, seq_len: int, num_features: int, device=default_device
 DataLoader = get_batch_to_dataloader(get_batch, default_num_outputs=1)
 
 
-def get_model_on_device(x, y, hyperparameters, device):
-    model, likelihood = get_model(x, y, hyperparameters)
-    model.to(device)
-    return model, likelihood
-
-
+# `get_model_on_device` is a hook for building the GP at every step t. The default uses fixed
+# hyperparameters; `priors/fast_gp_mix.py` swaps in `get_fitted_model` (hyperparameters fitted
+# by marginal likelihood on x[:t], y[:t]) via functools.partial. Do not remove.
 @torch.no_grad()
-def evaluate(x, y, y_non_noisy, use_mse=False, hyperparameters={},
-             get_model_on_device=get_model_on_device,
-             device=default_device, step_size=1, start_pos=0):
+def evaluate(
+        x, y, y_non_noisy,
+        use_mse=False,
+        hyperparameters={},
+        get_model_on_device=get_model_on_device,
+        device=default_device,
+        step_size=1,
+        start_pos=0
+):
     start_time = time.time()
     losses_after_t = [.0] if start_pos == 0 else []
     all_losses_after_t = []
 
+    args = hyperparameters.get('fast_computations', (True, True, True))
     with (
-        gpytorch.settings.fast_computations(
-            *hyperparameters.get('fast_computations', (True, True, True))),
+        gpytorch.settings.fast_computations(*args),
         gpytorch.settings.fast_pred_var(False)
     ):
         for t in range(max(start_pos, 1), len(x), step_size):
-            loss_sum = 0.
-            model, likelihood = get_model_on_device(x[:t].transpose(0, 1), y[:t].transpose(0, 1), hyperparameters,
-                                                    device)
+            # Given the first t points of a dataset, what is the distribution of the
+            # next point's y? Doing this for every t gives the exact-GP loss curve
+            # over context length. The Transformer is compared against that curve.
+
+            model, likelihood = get_model_on_device(
+                x[:t].transpose(0, 1),
+                y[:t].transpose(0, 1),
+                hyperparameters,
+                device)
 
             model.eval()
+
             # print([t.shape for t in model.train_inputs])
             # print(x[:t].transpose(0,1).shape, x[t].unsqueeze(1).shape, y[:t].transpose(0,1).shape)
             f = model(x[t].unsqueeze(1))
@@ -163,8 +187,12 @@ def evaluate(x, y, y_non_noisy, use_mse=False, hyperparameters={},
 
             losses_after_t.append(ls.mean())
             all_losses_after_t.append(ls.flatten())
-        return torch.stack(all_losses_after_t).to('cpu'), torch.tensor(losses_after_t).to(
-            'cpu'), time.time() - start_time
+
+        return (
+            torch.stack(all_losses_after_t).to('cpu'),
+            torch.tensor(losses_after_t).to('cpu'),
+            time.time() - start_time
+        )
 
 
 if __name__ == '__main__':
@@ -172,11 +200,9 @@ if __name__ == '__main__':
     hps = {"noise": .1, "outputscale": .1, "lengthscale": .1}
     hps_eval = {'fast_computations': (True, True, True)}
 
-    # hyperparameters = (.1, .1, .1)
-
     for redo_idx in range(1):
         print(
-            evaluate(*get_batch(batch_size=1000,
+            evaluate(*get_batch(batch_size=1_000,
                                 seq_len=10,
                                 num_features=10,
                                 hyperparameters=hps),
