@@ -20,6 +20,12 @@ def get_batch_to_dataloader(get_batch_method_, default_num_outputs=None, default
       - `num_features` / `num_outputs`: taken from the constructor kwargs if given (they are then also
         forwarded to `get_batch`), otherwise from the class attribute, i.e. the default passed here or
         set later with `DataLoader.num_outputs = ...`. A clear error is raised if neither is available.
+        NOTE: forwarding `num_outputs` to `get_batch` only works for `get_batch` implementations that
+        either declare a `num_outputs` parameter or accept `**kwargs` (e.g. `stroke.get_batch`,
+        `pyro.get_batch`). Most other priors (`fast_gp`, `fast_gp_mix`, `gp`, `ridge`, `mlp`) do not
+        accept `num_outputs` at all, so only rely on their class-level default (set via
+        `get_batch_to_dataloader(..., default_num_outputs=...)`) and never pass `num_outputs=...`
+        explicitly as a constructor kwarg for those priors.
       - `fuse_x_y`: constructor argument (default False); it is *not* forwarded to `get_batch`.
 
     :param get_batch_method_: function `(batch_size, seq_len, ...) -> (x, y, target_y)` with
@@ -27,12 +33,11 @@ def get_batch_to_dataloader(get_batch_method_, default_num_outputs=None, default
     :param default_num_outputs: default number of outputs of the prior (e.g. 1 for regression)
     :param default_num_features: default number of input features (usually passed per instance instead)
     """
-    default_num_outputs_, default_num_features_ = default_num_outputs, default_num_features
 
     class DL(PriorDataLoader):
         # Class-level defaults; can be overridden per instance via the constructor kwargs.
-        num_outputs = default_num_outputs_
-        num_features = default_num_features_
+        num_features = default_num_features
+        num_outputs = default_num_outputs
 
         def __init__(self, num_steps, fuse_x_y=False, **get_batch_kwargs):
             # torch's DataLoader.__init__ is intentionally not called: there is no dataset/sampler,
@@ -54,14 +59,17 @@ def get_batch_to_dataloader(get_batch_method_, default_num_outputs=None, default
 
             self.num_features = num_features
             self.num_outputs = num_outputs
-            print('DataLoader.__dict__', self.__dict__)
 
         @staticmethod
         def gbm(*args, fuse_x_y=False, **kwargs):
             x, y, target_y = get_batch_method_(*args, **kwargs)
             if fuse_x_y:
-                return torch.cat([x, torch.cat([torch.zeros_like(y[:1]), y[:-1]], 0).unsqueeze(-1).float()],
-                                 -1), target_y
+                return (
+                    torch.cat([
+                        x,
+                        torch.cat([torch.zeros_like(y[:1]), y[:-1]], 0).unsqueeze(-1).float()
+                    ], -1),
+                    target_y)
             else:
                 return (x, y), target_y
 

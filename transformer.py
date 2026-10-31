@@ -11,7 +11,13 @@ from utils import SeqBN
 
 
 class TransformerModel(nn.Module):
-    def __init__(self, encoder, n_out, ninp, nhead, nhid, nlayers, dropout=0.0, y_encoder=None, pos_encoder=None, decoder=None, input_normalization=False):
+    def __init__(
+            self,
+            encoder, n_out, ninp, nhead, nhid, nlayers,
+            dropout=0.0,
+            y_encoder=None, pos_encoder=None, decoder=None,
+            input_normalization=False
+    ):
         super().__init__()
         self.model_type = 'Transformer'
         encoder_layers = TransformerEncoderLayer(ninp, nhead, nhid, dropout, activation='gelu')
@@ -20,7 +26,12 @@ class TransformerModel(nn.Module):
         self.encoder = encoder
         self.y_encoder = y_encoder
         self.pos_encoder = pos_encoder
-        self.decoder = decoder(ninp, nhid, n_out) if decoder is not None else nn.Sequential(nn.Linear(ninp, nhid), nn.GELU(), nn.Linear(nhid, n_out))
+        self.decoder = (
+            decoder(ninp, nhid, n_out) if decoder is not None
+            else nn.Sequential(nn.Linear(ninp, nhid),
+                               nn.GELU(),
+                               nn.Linear(nhid, n_out))
+        )
         self.input_ln = SeqBN(ninp) if input_normalization else None
 
         self.init_weights()
@@ -33,15 +44,15 @@ class TransformerModel(nn.Module):
 
     @staticmethod
     def generate_D_q_matrix(sz, query_size):
-        train_size = sz-query_size
-        mask = torch.zeros(sz,sz) == 0
-        mask[:,train_size:].zero_()
+        train_size = sz - query_size
+        mask = torch.zeros(sz, sz) == 0
+        mask[:, train_size:].zero_()
         mask |= torch.eye(sz) == 1
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
     def init_weights(self):
-        initrange = 1.
+        # initrange = 1.
         # if isinstance(self.encoder,EmbeddingEncoder):
         #    self.encoder.weight.data.uniform_(-initrange, initrange)
         # self.decoder.bias.data.zero_()
@@ -55,14 +66,20 @@ class TransformerModel(nn.Module):
     def forward(self, src, src_mask=None, single_eval_pos=None):
         assert single_eval_pos is not None, 'Single eval pos is required now.'
         fuse_x_y = not isinstance(src, tuple)
-        assert not(fuse_x_y and single_eval_pos is not None), \
+        assert not (fuse_x_y and single_eval_pos is not None), \
             'Don\'t use both fuxe_x_y and single_eval_pos (permutation equivariant setup) at the same time.'
         if src_mask is None:
             x_src = src if fuse_x_y else src[0]
+
             if single_eval_pos is None:
-                src_mask = self.generate_square_subsequent_mask(len(x_src) if fuse_x_y else 2*len(x_src)).to(x_src.device)
+                src_mask = (
+                    self.generate_square_subsequent_mask(len(x_src) if fuse_x_y else 2 * len(x_src))
+                    .to(x_src.device))
             else:
-                src_mask = self.generate_D_q_matrix(len(x_src), len(x_src)-single_eval_pos).to(x_src.device)
+                src_mask = (
+                    self.generate_D_q_matrix(len(x_src), len(x_src) - single_eval_pos)
+                    .to(x_src.device))
+
         if not fuse_x_y:
             x_src, y_src = src
             x_src = self.encoder(x_src)

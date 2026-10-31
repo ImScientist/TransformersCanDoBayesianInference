@@ -204,7 +204,6 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError(f'Prior == {prior}.')
 
-
     loss_function = args.__dict__.pop('loss_function')
 
     criterion = nn.GaussianNLLLoss(reduction='none', full=True)
