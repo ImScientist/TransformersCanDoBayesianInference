@@ -20,7 +20,7 @@ from torch import nn
 
 from src import prior
 from src.positional_encodings import NoPositionalEncoding
-from src.transformer import TransformerModel
+from src.transformer import GaussianTransformerModel
 from src.utils import (
     default_device,
     get_cosine_schedule_with_warmup,
@@ -64,7 +64,7 @@ def train(
         seq_len=bptt,
         **extra_prior_kwargs_dict)
 
-    model = TransformerModel(
+    model = GaussianTransformerModel(
         encoder=nn.Linear(dl.num_features, emsize),
         ninp=emsize, nhead=nhead, nhid=nhid, nlayers=nlayers, dropout=dropout,
         y_encoder=nn.Linear(1, emsize),
