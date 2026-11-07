@@ -6,30 +6,30 @@
 
 import torch
 import gpytorch
+import gpytorch.kernels as gk
+import gpytorch.constraints as gc
 from src.utils import get_batch_to_dataloader, default_device
 
 
 def dot_product_rbf_kernel(variance, outputscale=0., lengthscale=None, bias=0.):
     """Kernel `bias + variance * x^T x' + outputscale * RBF(lengthscale)` with fixed hyperparameters
     (see `ExactGPDotProductRBFModel`)."""
-    covar_module = gpytorch.kernels.LinearKernel(
-        variance_constraint=gpytorch.constraints.Positive(initial_value=variance)
+    covar_module = gk.LinearKernel(
+        variance_constraint=gc.Positive(initial_value=variance)
     )
 
     # Positive constraints cannot represent 0, so the RBF and offset kernels are only added if needed.
     if outputscale > 0:
         if lengthscale is None:
             raise ValueError('`lengthscale` is required when `outputscale > 0`.')
-        covar_module = covar_module + gpytorch.kernels.ScaleKernel(
-            base_kernel=gpytorch.kernels.RBFKernel(
-                lengthscale_constraint=gpytorch.constraints.Positive(initial_value=lengthscale)
-            ),
-            outputscale_constraint=gpytorch.constraints.Positive(initial_value=outputscale)
+        covar_module = covar_module + gk.ScaleKernel(
+            base_kernel=gk.RBFKernel(lengthscale_constraint=gc.Positive(initial_value=lengthscale)),
+            outputscale_constraint=gc.Positive(initial_value=outputscale)
         )
 
     if bias > 0:
-        covar_module = covar_module + gpytorch.kernels.ConstantKernel(
-            constant_constraint=gpytorch.constraints.Positive(initial_value=bias)
+        covar_module = covar_module + gk.ConstantKernel(
+            constant_constraint=gc.Positive(initial_value=bias)
         )
 
     return covar_module
@@ -61,12 +61,11 @@ class ExactGPDotProductRBFModel(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, noise, variance, outputscale=0., lengthscale=None, bias=0.,
                  min_noise=1.e-9):
         likelihood = gpytorch.likelihoods.GaussianLikelihood(
-            noise_constraint=gpytorch.constraints.GreaterThan(min_noise, initial_value=noise)
+            noise_constraint=gc.GreaterThan(min_noise, initial_value=noise)
         )
 
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
-
         self.covar_module = dot_product_rbf_kernel(variance, outputscale, lengthscale, bias)
 
     def forward(self, x):
@@ -106,20 +105,20 @@ class ExactGPDotProductRBFMultitaskModel(gpytorch.models.ExactGP):
         likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
             num_tasks=num_tasks,
             has_task_noise=False,
-            noise_constraint=gpytorch.constraints.GreaterThan(min_noise, initial_value=noise)
+            noise_constraint=gc.GreaterThan(min_noise, initial_value=noise)
         )
 
         super().__init__(train_x, train_y, likelihood)
         self.num_tasks = num_tasks
         self.mean_module = gpytorch.means.MultitaskMean(gpytorch.means.ConstantMean(), num_tasks=num_tasks)
-
-        self.covar_module = gpytorch.kernels.MultitaskKernel(
+        self.covar_module = gk.MultitaskKernel(
             dot_product_rbf_kernel(variance, outputscale, lengthscale, bias), num_tasks=num_tasks
         )
         # MultitaskKernel does not forward `var_constraint`, so its IndexKernel is replaced.
-        self.covar_module.task_covar_module = gpytorch.kernels.IndexKernel(
-            num_tasks=num_tasks, rank=num_tasks,
-            var_constraint=gpytorch.constraints.Positive(initial_value=min_task_var)
+        self.covar_module.task_covar_module = gk.IndexKernel(
+            num_tasks=num_tasks,
+            rank=num_tasks,
+            var_constraint=gc.Positive(initial_value=min_task_var)
         )
         self.covar_module.task_covar_module.initialize(
             covar_factor=self.task_covar_factor(task_covariance, num_tasks))
@@ -129,12 +128,15 @@ class ExactGPDotProductRBFMultitaskModel(gpytorch.models.ExactGP):
         """`W` with `W W^T = task_covariance` (symmetric PSD), shape (num_tasks, num_tasks)."""
         if task_covariance is None:
             return torch.eye(num_tasks)
+
         B = torch.as_tensor(task_covariance, dtype=torch.get_default_dtype())
         if B.shape != (num_tasks, num_tasks) or not torch.allclose(B, B.T):
             raise ValueError(f'`task_covariance` must be a symmetric ({num_tasks}, {num_tasks}) matrix.')
+
         eigvals, eigvecs = torch.linalg.eigh(B)
         if eigvals.min() < -1e-6 * eigvals.abs().max():
             raise ValueError('`task_covariance` must be positive semi-definite.')
+
         return eigvecs * eigvals.clamp_min(0).sqrt()
 
     def forward(self, x):
