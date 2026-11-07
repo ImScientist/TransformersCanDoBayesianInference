@@ -1,11 +1,38 @@
 """GP prior (fixed hyperparameters) for training a PFN.
 
 `get_batch` / `DataLoader` sample from `ExactGPDotProductRBFModel` (linear trend + optional RBF part).
+`ExactGPDotProductRBFMultitaskModel` is its multi-output (ICM) extension (not yet used by `get_batch`).
 """
 
 import torch
 import gpytorch
 from src.utils import get_batch_to_dataloader, default_device
+
+
+def dot_product_rbf_kernel(variance, outputscale=0., lengthscale=None, bias=0.):
+    """Kernel `bias + variance * x^T x' + outputscale * RBF(lengthscale)` with fixed hyperparameters
+    (see `ExactGPDotProductRBFModel`)."""
+    covar_module = gpytorch.kernels.LinearKernel(
+        variance_constraint=gpytorch.constraints.Positive(initial_value=variance)
+    )
+
+    # Positive constraints cannot represent 0, so the RBF and offset kernels are only added if needed.
+    if outputscale > 0:
+        if lengthscale is None:
+            raise ValueError('`lengthscale` is required when `outputscale > 0`.')
+        covar_module = covar_module + gpytorch.kernels.ScaleKernel(
+            base_kernel=gpytorch.kernels.RBFKernel(
+                lengthscale_constraint=gpytorch.constraints.Positive(initial_value=lengthscale)
+            ),
+            outputscale_constraint=gpytorch.constraints.Positive(initial_value=outputscale)
+        )
+
+    if bias > 0:
+        covar_module = covar_module + gpytorch.kernels.ConstantKernel(
+            constant_constraint=gpytorch.constraints.Positive(initial_value=bias)
+        )
+
+    return covar_module
 
 
 class ExactGPDotProductRBFModel(gpytorch.models.ExactGP):
@@ -40,30 +67,80 @@ class ExactGPDotProductRBFModel(gpytorch.models.ExactGP):
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
 
-        self.covar_module = gpytorch.kernels.LinearKernel(
-            variance_constraint=gpytorch.constraints.Positive(initial_value=variance)
-        )
-
-        # Positive constraints cannot represent 0, so the RBF and offset kernels are only added if needed.
-        if outputscale > 0:
-            if lengthscale is None:
-                raise ValueError('`lengthscale` is required when `outputscale > 0`.')
-            self.covar_module = self.covar_module + gpytorch.kernels.ScaleKernel(
-                base_kernel=gpytorch.kernels.RBFKernel(
-                    lengthscale_constraint=gpytorch.constraints.Positive(initial_value=lengthscale)
-                ),
-                outputscale_constraint=gpytorch.constraints.Positive(initial_value=outputscale)
-            )
-
-        if bias > 0:
-            self.covar_module = self.covar_module + gpytorch.kernels.ConstantKernel(
-                constant_constraint=gpytorch.constraints.Positive(initial_value=bias)
-            )
+        self.covar_module = dot_product_rbf_kernel(variance, outputscale, lengthscale, bias)
 
     def forward(self, x):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+
+class ExactGPDotProductRBFMultitaskModel(gpytorch.models.ExactGP):
+    """Multi-output (Intrinsic Coregionalization Model, ICM) version of `ExactGPDotProductRBFModel`.
+
+    The output at each input is a vector `y(x)` of `num_tasks` components with covariance
+
+        Cov(y_i(x), y_j(x')) = k(x, x') * B_ij + noise * delta_ij * delta(x, x')
+
+    where `k` is the dot-product + RBF kernel of `ExactGPDotProductRBFModel` (shared by all outputs) and
+    `B` is the `num_tasks x num_tasks` task covariance matrix (PSD). `B = I` gives independent outputs,
+    off-diagonal entries correlate them. Each output has a constant mean.
+
+    gpytorch parametrizes `B = W W^T + diag(v)` (`IndexKernel`); here `W` is set from the eigendecomposition
+    of `task_covariance` (rank `num_tasks`, also works for singular `B`) and `v = min_task_var`, so
+    `B ~= task_covariance`. All hyperparameters are fixed at construction time.
+
+    :param train_x: training inputs, shape (batch, n, num_features), or None for a prior-only model
+    :param train_y: training targets, shape (batch, n, num_tasks), or None for a prior-only model.
+        A prior-only model must be put in eval mode (`model.eval()`) before calling it.
+    :param num_tasks: number of outputs
+    :param task_covariance: PSD matrix `B`, shape (num_tasks, num_tasks); default identity
+    :param noise: observation noise variance (shared by all outputs, independent across outputs)
+    :param variance, outputscale, lengthscale, bias: see `ExactGPDotProductRBFModel`
+    :param min_noise: lower bound of the noise constraint
+    :param min_task_var: diagonal `v` added to `W W^T` (gpytorch requires `v > 0`)
+    """
+
+    def __init__(self, train_x, train_y, num_tasks, noise, variance, outputscale=0., lengthscale=None, bias=0.,
+                 task_covariance=None, min_noise=1.e-9, min_task_var=1.e-9):
+        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+            num_tasks=num_tasks,
+            has_task_noise=False,
+            noise_constraint=gpytorch.constraints.GreaterThan(min_noise, initial_value=noise)
+        )
+
+        super().__init__(train_x, train_y, likelihood)
+        self.num_tasks = num_tasks
+        self.mean_module = gpytorch.means.MultitaskMean(gpytorch.means.ConstantMean(), num_tasks=num_tasks)
+
+        self.covar_module = gpytorch.kernels.MultitaskKernel(
+            dot_product_rbf_kernel(variance, outputscale, lengthscale, bias), num_tasks=num_tasks
+        )
+        # MultitaskKernel does not forward `var_constraint`, so its IndexKernel is replaced.
+        self.covar_module.task_covar_module = gpytorch.kernels.IndexKernel(
+            num_tasks=num_tasks, rank=num_tasks,
+            var_constraint=gpytorch.constraints.Positive(initial_value=min_task_var)
+        )
+        self.covar_module.task_covar_module.initialize(
+            covar_factor=self.task_covar_factor(task_covariance, num_tasks))
+
+    @staticmethod
+    def task_covar_factor(task_covariance, num_tasks):
+        """`W` with `W W^T = task_covariance` (symmetric PSD), shape (num_tasks, num_tasks)."""
+        if task_covariance is None:
+            return torch.eye(num_tasks)
+        B = torch.as_tensor(task_covariance, dtype=torch.get_default_dtype())
+        if B.shape != (num_tasks, num_tasks) or not torch.allclose(B, B.T):
+            raise ValueError(f'`task_covariance` must be a symmetric ({num_tasks}, {num_tasks}) matrix.')
+        eigvals, eigvecs = torch.linalg.eigh(B)
+        if eigvals.min() < -1e-6 * eigvals.abs().max():
+            raise ValueError('`task_covariance` must be positive semi-definite.')
+        return eigvecs * eigvals.clamp_min(0).sqrt()
+
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultitaskMultivariateNormal(mean_x, covar_x)
 
 
 def get_model(x, y, hyperparameters):
