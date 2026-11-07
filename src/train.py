@@ -17,10 +17,10 @@ import torch
 import yaml
 from torch import nn
 
-from . import prior
-from .positional_encodings import NoPositionalEncoding
-from .transformer import TransformerModel
-from .utils import (
+from src import prior
+from src.positional_encodings import NoPositionalEncoding
+from src.transformer import TransformerModel
+from src.utils import (
     default_device,
     get_cosine_schedule_with_warmup,
     get_openai_lr,
@@ -29,11 +29,15 @@ from .utils import (
 )
 
 
-def train(priordataloader_class=prior.DataLoader, emsize=200, nhid=200, nlayers=6, nhead=2, dropout=0.2,
-          epochs=10, steps_per_epoch=100, batch_size=200, bptt=10, lr=None, warmup_epochs=10,
-          input_normalization=False, decoder=None, extra_prior_kwargs_dict=None,
-          scheduler=get_cosine_schedule_with_warmup, load_weights_from_this_state_dict=None,
-          single_eval_pos_gen=None, device=None, aggregate_k_gradients=1, verbose=True):
+def train(
+        priordataloader_class=prior.DataLoader,
+        emsize=200, nhid=200, nlayers=6, nhead=2, dropout=0.2,
+        epochs=10, steps_per_epoch=100, batch_size=200,
+        bptt=10,
+        lr=None, warmup_epochs=10,
+        input_normalization=False, decoder=None, extra_prior_kwargs_dict=None,
+        scheduler=get_cosine_schedule_with_warmup, load_weights_from_this_state_dict=None,
+        single_eval_pos_gen=None, device=None, aggregate_k_gradients=1, verbose=True):
     """Train a PFN with Gaussian NLL loss.
 
     :param priordataloader_class: DataLoader class of the prior (default: GP prior from `src/prior.py`)
@@ -45,14 +49,19 @@ def train(priordataloader_class=prior.DataLoader, emsize=200, nhid=200, nlayers=
     :param device: device for the model; default `default_device` (CUDA, MPS, then CPU)
     :return: (mean loss of the last epoch, mean loss per single_eval_pos of the last epoch, model on CPU)
     """
+
     device = device or default_device
     print(f'Using {device} device')
+
     extra_prior_kwargs_dict = extra_prior_kwargs_dict or {}
     if single_eval_pos_gen is None:
         single_eval_pos_gen = get_weighted_single_eval_pos_sampler(bptt)
 
-    dl = priordataloader_class(num_steps=steps_per_epoch, batch_size=batch_size, seq_len=bptt,
-                               **extra_prior_kwargs_dict)
+    dl = priordataloader_class(
+        num_steps=steps_per_epoch,
+        batch_size=batch_size,
+        seq_len=bptt,
+        **extra_prior_kwargs_dict)
 
     criterion = nn.GaussianNLLLoss(reduction='none', full=True)
     assert dl.num_outputs == 1, 'GaussianNLLLoss setup supports a single regression target.'
@@ -62,9 +71,10 @@ def train(priordataloader_class=prior.DataLoader, emsize=200, nhid=200, nlayers=
         encoder=nn.Linear(dl.num_features, emsize),
         n_out=n_out, ninp=emsize, nhead=nhead, nhid=nhid, nlayers=nlayers, dropout=dropout,
         y_encoder=nn.Linear(1, emsize),
-        pos_encoder=NoPositionalEncoding(emsize, bptt * 2),
+        pos_encoder=NoPositionalEncoding(emsize, bptt * 2),  # arguments don't matter
         decoder=decoder,
         input_normalization=input_normalization)
+
     model.criterion = criterion
     if load_weights_from_this_state_dict is not None:
         model.load_state_dict(load_weights_from_this_state_dict)
@@ -73,6 +83,7 @@ def train(priordataloader_class=prior.DataLoader, emsize=200, nhid=200, nlayers=
     if lr is None:
         lr = get_openai_lr(model)
         print(f"Using OpenAI max lr of {lr}.")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = scheduler(optimizer, warmup_epochs, epochs)
 
@@ -98,7 +109,7 @@ def train(priordataloader_class=prior.DataLoader, emsize=200, nhid=200, nlayers=
 
             targets = targets[single_eval_pos:].to(device)
             mean_pred = output[..., 0]
-            var_pred = output[..., 1].abs()
+            var_pred = nn.functional.softplus(output[..., 1]) + 1e-6
             losses = criterion(mean_pred.flatten(), targets.flatten(), var=var_pred.flatten())
             losses = losses.view(*output.shape[0:2])  # (num_queries, batch_size)
 
@@ -136,6 +147,7 @@ def train(priordataloader_class=prior.DataLoader, emsize=200, nhid=200, nlayers=
             print('-' * 89)
 
         scheduler.step()
+
     return total_loss, total_positional_losses, model.to('cpu')
 
 

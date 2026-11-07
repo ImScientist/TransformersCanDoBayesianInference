@@ -159,4 +159,3 @@ def get_batch_to_dataloader(get_batch_method_, default_num_outputs=None, default
             return iter(self.gbm(**self.get_batch_kwargs) for _ in range(self.num_steps))
 
     return DL
-

@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import gpytorch
 
-from .utils import get_batch_to_dataloader, default_device
+from src.utils import get_batch_to_dataloader, default_device
 
 
 class ExactGPModel(gpytorch.models.ExactGP):
@@ -188,4 +188,3 @@ if __name__ == '__main__':
                  use_mse=False,
                  hyperparameters=hps_eval)
     )
-
