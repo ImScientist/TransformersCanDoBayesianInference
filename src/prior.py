@@ -1,4 +1,6 @@
 """GP prior (fixed hyperparameters) for training a PFN.
+
+`get_batch` / `DataLoader` sample from `ExactGPDotProductRBFModel` (linear trend + optional RBF part).
 """
 
 import torch
@@ -138,14 +140,20 @@ class ExactGPDotProductRBFModel(gpytorch.models.ExactGP):
 
 
 def get_model(x, y, hyperparameters):
-    """ Get model and likelihood """
+    """Get the `ExactGPDotProductRBFModel` and its likelihood.
 
-    model = ExactGPModel(
+    :param hyperparameters: dict with `noise`, `variance` and optionally `outputscale` (default 0, no RBF part),
+        `lengthscale` (required if `outputscale > 0`) and `bias` (default 0)
+    """
+
+    model = ExactGPDotProductRBFModel(
         train_x=x,
         train_y=y,
         noise=hyperparameters["noise"],
-        outputscale=hyperparameters["outputscale"],
-        lengthscale=hyperparameters["lengthscale"])
+        variance=hyperparameters["variance"],
+        outputscale=hyperparameters.get("outputscale", 0.),
+        lengthscale=hyperparameters.get("lengthscale"),
+        bias=hyperparameters.get("bias", 0.))
 
     return model, model.likelihood
 
@@ -162,11 +170,18 @@ def get_batch(
         hyperparameters: dict | None = None,
         equidistant_x: bool = False
 ):
+    """Sample `batch_size` datasets from the `ExactGPDotProductRBFModel` prior (see `get_model` for the
+    hyperparameters).
+
+    :return: x: (seq_len, batch_size, num_features), y and target_y (identical): (seq_len, batch_size)
+    """
     if hyperparameters is None:
         hyperparameters = {
             "noise": .1,
+            "variance": .1,
             "outputscale": .1,
-            "lengthscale": .1}
+            "lengthscale": .1,
+            "bias": 0.}
 
     with gpytorch.settings.fast_computations(*hyperparameters.get('fast_computations', (True, True, True))):
 
