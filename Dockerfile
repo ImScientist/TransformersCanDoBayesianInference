@@ -26,11 +26,12 @@ WORKDIR /app
 
 # Install dependencies first (cached layer; only rebuilt when pyproject.toml / uv.lock change).
 # --frozen: install exactly what uv.lock specifies, fail instead of re-resolving.
+# --no-dev: skip the `dev` dependency group (jupyter, seaborn); optional extras are skipped by default.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=.python-version,target=.python-version \
-    uv sync --frozen --no-install-project
+    uv sync --frozen --no-install-project --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
