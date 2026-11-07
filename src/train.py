@@ -4,8 +4,8 @@ Refactored copy of `train.py` with fixed choices:
     encoder:      nn.Linear(num_features, emsize)
     y_encoder:    nn.Linear(1, emsize)
     pos_encoder:  NoPositionalEncoding
-    criterion:    nn.GaussianNLLLoss(reduction='none', full=True); the model outputs (mean, variance)
-                  for every query point, i.e. n_out = 2
+    criterion:    `model.criterion` = nn.GaussianNLLLoss(reduction='none', full=True); the model returns
+                  (mean, variance) for every query point (variance mapped to be positive inside the model)
 
 Run from the repository root, e.g.:
     python -m src.train --num_features 1 --epochs 10 --bptt 20 --emsize 128 --nhead 2
@@ -63,19 +63,14 @@ def train(
         seq_len=bptt,
         **extra_prior_kwargs_dict)
 
-    criterion = nn.GaussianNLLLoss(reduction='none', full=True)
-    assert dl.num_outputs == 1, 'GaussianNLLLoss setup supports a single regression target.'
-    n_out = 2  # mean and variance
-
     model = TransformerModel(
         encoder=nn.Linear(dl.num_features, emsize),
-        n_out=n_out, ninp=emsize, nhead=nhead, nhid=nhid, nlayers=nlayers, dropout=dropout,
+        ninp=emsize, nhead=nhead, nhid=nhid, nlayers=nlayers, dropout=dropout,
         y_encoder=nn.Linear(1, emsize),
         pos_encoder=NoPositionalEncoding(emsize, bptt * 2),  # arguments don't matter
         decoder=decoder,
         input_normalization=input_normalization)
 
-    model.criterion = criterion
     if load_weights_from_this_state_dict is not None:
         model.load_state_dict(load_weights_from_this_state_dict)
     model.to(device)
@@ -103,15 +98,12 @@ def train(
             single_eval_pos = single_eval_pos_gen() if callable(single_eval_pos_gen) else single_eval_pos_gen
             assert 0 <= single_eval_pos < bptt, f'single_eval_pos must be in [0, {bptt}), got {single_eval_pos}.'
 
-            # (bptt - single_eval_pos, batch_size, 2)
-            output = model((x.to(device), y.to(device)), single_eval_pos=single_eval_pos)
+            # each (bptt - single_eval_pos, batch_size)
+            mean_pred, var_pred = model((x.to(device), y.to(device)), single_eval_pos=single_eval_pos)
             forward_time = time.time() - before_forward
 
             targets = targets[single_eval_pos:].to(device)
-            mean_pred = output[..., 0]
-            var_pred = nn.functional.softplus(output[..., 1]) + 1e-6
-            losses = criterion(mean_pred.flatten(), targets.flatten(), var=var_pred.flatten())
-            losses = losses.view(*output.shape[0:2])  # (num_queries, batch_size)
+            losses = model.criterion(mean_pred, targets, var=var_pred)  # (num_queries, batch_size)
 
             loss = losses.mean()
             loss.backward()
