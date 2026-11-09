@@ -44,9 +44,14 @@ from src.utils import (
 def build_model(config: TrainConfig, decoder=None):
     """Create the (untrained) `GaussianTransformerModel` described by `config`."""
     m = config.model
+
     return GaussianTransformerModel(
         encoder=nn.Linear(config.prior.num_features, m.emsize),
-        ninp=m.emsize, nhead=m.nhead, nhid=m.nhid or 2 * m.emsize, nlayers=m.nlayers, dropout=m.dropout,
+        ninp=m.emsize,
+        nhead=m.nhead,
+        nhid=m.nhid or 2 * m.emsize,
+        nlayers=m.nlayers,
+        dropout=m.dropout,
         y_encoder=nn.Linear(1, m.emsize),
         pos_encoder=NoPositionalEncoding(m.emsize, config.training.bptt * 2),  # arguments don't matter
         decoder=decoder,
@@ -57,8 +62,11 @@ def build_model(config: TrainConfig, decoder=None):
 def train(
         config: TrainConfig | None = None,
         priordataloader_class=prior.DataLoader,
-        decoder=None, scheduler=get_cosine_schedule_with_warmup, load_weights_from_this_state_dict=None,
-        verbose=True):
+        decoder=None,
+        scheduler=get_cosine_schedule_with_warmup,
+        load_weights_from_this_state_dict=None,
+        verbose=True
+):
     """Train a PFN with Gaussian NLL loss.
 
     :param config: all (serializable) settings, see `src/config.py`; default `TrainConfig()`.
