@@ -40,12 +40,18 @@ class _Config(BaseModel):
 class Distribution(_Config):
     """Distribution of a prior hyperparameter, sampled independently for every dataset (sequence) of a batch
     (see `src.prior.sample_hyperparameters`). `log_uniform` is uniform in log space (requires `low > 0`).
+    With `zero_prob > 0` the distribution is zero-inflated: the value is exactly 0 with probability
+    `zero_prob`, otherwise drawn from `dist`. Useful for scales that switch kernel parts off for some datasets
+    (`variance`, `bias`, `rbf_outputscale`, `periodic_outputscale`); hyperparameters that must be > 0
+    (e.g. `noise`, lengthscales, `period`) reject it.
 
-    YAML: `noise: {dist: log_uniform, low: 1.e-4, high: 0.1}`
+    YAML: `noise: {dist: log_uniform, low: 1.e-4, high: 0.1}`,
+          `periodic_outputscale: {dist: log_uniform, low: 0.01, high: 1.0, zero_prob: 0.5}`
     """
     dist: Literal['uniform', 'log_uniform']
     low: float
     high: float
+    zero_prob: Annotated[float, Field(ge=0, le=1)] = 0.
 
     @model_validator(mode='after')
     def _check(self) -> Self:
@@ -63,8 +69,14 @@ Hyperparameter = Annotated[
 
 
 def _bounds(value):
-    """(min, max) of a fixed value or a `Distribution`."""
-    return (value.low, value.high) if isinstance(value, Distribution) else (value, value)
+    """(min, max) of a fixed value or a `Distribution` (including the 0 of a zero-inflated one)."""
+    if not isinstance(value, Distribution):
+        return value, value
+    if value.zero_prob == 1:
+        return 0., 0.
+    if value.zero_prob > 0:
+        return min(value.low, 0.), max(value.high, 0.)
+    return value.low, value.high
 
 
 _RENAMED_HYPERPARAMETERS = {'outputscale': 'rbf_outputscale', 'lengthscale': 'rbf_lengthscale'}

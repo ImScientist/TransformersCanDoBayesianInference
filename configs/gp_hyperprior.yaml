@@ -1,5 +1,7 @@
 # GP prior with a hyperprior: every dataset (sequence) of every batch gets its own hyperparameters.
-# Each hyperparameter is a fixed number or {dist: uniform | log_uniform, low: a, high: b}.
+# Each hyperparameter is a fixed number or {dist: uniform | log_uniform, low: a, high: b[, zero_prob: p]};
+# zero_prob (default 0) = probability of exactly 0 (zero-inflated), e.g. to switch kernel parts off for some
+# datasets (variance, bias, rbf_outputscale, periodic_outputscale).
 # All settings are listed (defaults and constraints: src/config.py); print the resolved config with
 #   python -m src.train --config configs/gp_hyperprior.yaml --print_config
 prior:
@@ -10,13 +12,13 @@ prior:
     # Kernel: bias + variance * x^T x' + rbf_outputscale * RBF(rbf_lengthscale)
     #         + periodic_outputscale * ExpSineSquared(period, periodic_lengthscale) [* RBF(periodic_decay)]
     noise: { dist: log_uniform, low: 1.e-4, high: 0.1 }  # observation noise variance; > 0
-    variance: { dist: log_uniform, low: 0.1, high: 10.0 }  # linear (dot-product) part; >= 0
-    rbf_outputscale: { dist: uniform, low: 0.0, high: 1.0 }  # 0 = no RBF part
+    variance: { dist: log_uniform, low: 0.1, high: 10.0, zero_prob: 0.2 }  # linear (dot-product) part; >= 0
+    rbf_outputscale: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.2 }  # 0 = no RBF part
     rbf_lengthscale: { dist: log_uniform, low: 0.05, high: 1.0 }  # > 0 if rbf_outputscale can be > 0
-    bias: { dist: uniform, low: 0.0, high: 1.0 }  # constant offset (intercept variance); 0 = none
-    periodic_outputscale: 0.0  # 0 = no periodic part
-    period: null  # > 0 if periodic_outputscale can be > 0
-    periodic_lengthscale: null  # smoothness within a period; > 0 if periodic_outputscale can be > 0
+    bias: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.2 }  # constant offset (intercept variance); 0 = none
+    periodic_outputscale: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.2 }  # 0 = no periodic part
+    period: { dist: log_uniform, low: 0.1, high: 1.0 }  # > 0 if periodic_outputscale can be > 0 (x in [0, 1])
+    periodic_lengthscale: { dist: log_uniform, low: 0.5, high: 2.0 }  # smoothness within a period; small = more harmonics
     periodic_decay: null  # lengthscale of the RBF factor (locally periodic); null = exactly periodic
 
 model:

@@ -22,9 +22,9 @@ def sample_hyperparameters(hyperparameters: GPHyperparameters, batch_size, devic
     Every field of `hyperparameters` is either
       - a number (the same value for all datasets),
       - `None` (kept as `None`), or
-      - a `Distribution` (`uniform` | `log_uniform` between `low` and `high`), sampled independently per
-        dataset. `log_uniform` (uniform in `log`, requires `low > 0`) suits scale parameters spanning orders
-        of magnitude.
+      - a `Distribution` (`uniform` | `log_uniform` between `low` and `high`, optionally zero-inflated: exactly
+        0 with probability `zero_prob`), sampled independently per dataset. `log_uniform` (uniform in `log`,
+        requires `low > 0`) suits scale parameters spanning orders of magnitude.
 
     :return: dict with the field names as keys; numbers and distributions become tensors of shape (batch_size,)
     """
@@ -39,6 +39,9 @@ def sample_hyperparameters(hyperparameters: GPHyperparameters, batch_size, devic
                 sampled[name] = spec.low + (spec.high - spec.low) * u
             else:  # log_uniform
                 sampled[name] = torch.exp(math.log(spec.low) + (math.log(spec.high) - math.log(spec.low)) * u)
+            if spec.zero_prob > 0:
+                is_zero = torch.rand(batch_size, device=device) < spec.zero_prob
+                sampled[name] = sampled[name].masked_fill(is_zero, 0.)
         else:
             sampled[name] = torch.full((batch_size,), float(spec), device=device)
     return sampled
