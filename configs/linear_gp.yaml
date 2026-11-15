@@ -7,7 +7,7 @@ prior:
   hyperparameters:
     noise: 0.01
     variance: 3.0
-    outputscale: 0.0  # no RBF part
+    rbf_outputscale: 0.0  # no RBF part
     bias: 0.5
 
 training:

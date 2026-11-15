@@ -7,8 +7,8 @@ prior:
   hyperparameters:
     noise: { dist: log_uniform, low: 1.e-4, high: 0.1 }
     variance: { dist: log_uniform, low: 0.1, high: 10.0 }
-    outputscale: { dist: uniform, low: 0.0, high: 1.0 }
-    lengthscale: { dist: log_uniform, low: 0.05, high: 1.0 }
+    rbf_outputscale: { dist: uniform, low: 0.0, high: 1.0 }
+    rbf_lengthscale: { dist: log_uniform, low: 0.05, high: 1.0 }
     bias: { dist: uniform, low: 0.0, high: 1.0 }
 
 model:

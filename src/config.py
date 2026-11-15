@@ -2,10 +2,9 @@
 
 The pydantic models below are the single source of truth for all default values and constraints. A
 configuration is built by merging (with OmegaConf), in this order (later wins):
-    1. the defaults of `TrainConfig`
-    2. YAML files (only the values that differ from the defaults are needed), e.g. `configs/linear_gp.yaml`
-    3. dotted overrides, e.g. `["model.emsize=256", "prior.hyperparameters.noise=0.01"]`
-and then validated by pydantic: unknown keys, values of the wrong type and violated constraints raise a
+    1. YAML files (only the values that differ from the defaults are needed), e.g. `configs/linear_gp.yaml`
+    2. dotted overrides, e.g. `["model.emsize=256", "prior.hyperparameters.noise=0.01"]`
+and then validated by pydantic, which fills in the defaults of `TrainConfig` for missing values: unknown keys, values of the wrong type and violated constraints raise a
 `pydantic.ValidationError` (a `ValueError`) that lists every problem with its path.
 
 Usage in a notebook:
@@ -15,6 +14,7 @@ Usage in a notebook:
 Constraints between sections (e.g. `training.steps_per_epoch % optim.aggregate_k_gradients`) are only checked
 when the whole config is validated: by `load_config`, `config_from_dict` and at the start of `src.train.train`.
 """
+import warnings
 from typing import Annotated, Literal, Self
 
 import yaml
@@ -67,17 +67,36 @@ def _bounds(value):
     return (value.low, value.high) if isinstance(value, Distribution) else (value, value)
 
 
+_RENAMED_HYPERPARAMETERS = {'outputscale': 'rbf_outputscale', 'lengthscale': 'rbf_lengthscale'}
+
+
 class GPHyperparameters(_Config):
     """Hyperparameters of the GP prior (see `src.prior.get_batch`). Each is a fixed number or a `Distribution`."""
     noise: Hyperparameter = .1  # observation noise variance; must be > 0
     variance: Hyperparameter = .1  # variance of the linear (dot-product) part
-    outputscale: Hyperparameter = .1  # RBF output scale; 0 = no RBF part
-    lengthscale: Hyperparameter | None = .1  # RBF lengthscale; required if outputscale can be > 0
+    rbf_outputscale: Hyperparameter = .1  # RBF output scale; 0 = no RBF part
+    rbf_lengthscale: Hyperparameter | None = .1  # RBF lengthscale; required if rbf_outputscale can be > 0
     bias: Hyperparameter = 0.  # constant kernel offset (intercept variance); 0 = none
     periodic_outputscale: Hyperparameter = 0.  # Exp-Sine-Squared output scale; 0 = no periodic part
     period: Hyperparameter | None = None  # period; required if periodic_outputscale can be > 0
     periodic_lengthscale: Hyperparameter | None = None  # smoothness within a period; small = more harmonics
     periodic_decay: Hyperparameter | None = None  # lengthscale of the RBF factor; None = exactly periodic
+
+    @model_validator(mode='before')
+    @classmethod
+    def _rename_deprecated(cls, data):
+        """Accept the old names (configs/checkpoints saved before the rename), with a `DeprecationWarning`."""
+        if not isinstance(data, dict) or not any(old in data for old in _RENAMED_HYPERPARAMETERS):
+            return data
+        data = dict(data)
+        for old, new in _RENAMED_HYPERPARAMETERS.items():
+            if old in data:
+                if new in data:
+                    raise ValueError(f'got both {old!r} (deprecated) and {new!r}; use only {new!r}')
+                warnings.warn(f'GP hyperparameter {old!r} is deprecated, use {new!r}', DeprecationWarning,
+                              stacklevel=2)
+                data[new] = data.pop(old)
+        return data
 
     @model_validator(mode='after')
     def _check(self) -> Self:
@@ -93,9 +112,9 @@ class GPHyperparameters(_Config):
         errors = []
         if low('noise') <= 0:
             errors.append('noise must be > 0')
-        errors += [f'{name} must be >= 0' for name in ('variance', 'outputscale', 'bias', 'periodic_outputscale')
+        errors += [f'{name} must be >= 0' for name in ('variance', 'rbf_outputscale', 'bias', 'periodic_outputscale')
                    if low(name) < 0]
-        positive_if_needed('outputscale', ['lengthscale'])
+        positive_if_needed('rbf_outputscale', ['rbf_lengthscale'])
         positive_if_needed('periodic_outputscale', ['period', 'periodic_lengthscale'])
         if self.periodic_decay is not None and low('periodic_decay') <= 0:
             errors.append('periodic_decay must be > 0 or null')
@@ -181,9 +200,9 @@ def config_from_dict(data):
 
 
 def load_config(*paths, overrides=()):
-    """Defaults <- YAML files (in order) <- dotted overrides `key.sub=value` (values parsed as YAML)."""
+    """YAML files (in order) <- dotted overrides `key.sub=value` (values parsed as YAML); missing values take
+    the `TrainConfig` defaults."""
     merged = OmegaConf.merge(
-        config_to_dict(TrainConfig()),
         *(OmegaConf.load(path) for path in paths),
         OmegaConf.from_dotlist(list(overrides)))
     return config_from_dict(OmegaConf.to_container(merged, resolve=True))

@@ -102,7 +102,7 @@ def train(
 
     prior_kwargs = {'num_features': p.num_features,
                     'equidistant_x': p.equidistant_x,
-                    'hyperparameters': config_to_dict(config)['prior']['hyperparameters']}
+                    'hyperparameters': p.hyperparameters}
     if p.device is not None:
         prior_kwargs['device'] = p.device
     dl = priordataloader_class(
