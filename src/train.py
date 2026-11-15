@@ -79,7 +79,7 @@ def train(
     :return: (mean loss of the last epoch, mean loss per single_eval_pos of the last epoch, model on CPU)
     """
     config = config or TrainConfig()
-    config.validate()
+    config_from_dict(config_to_dict(config))  # re-check all constraints (incl. cross-section) after in-place edits
     p, o, t = config.prior, config.optim, config.training
 
     if t.seed is None:
