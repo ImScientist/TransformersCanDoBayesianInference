@@ -40,6 +40,10 @@ class GPHyperparameters:
     outputscale: float | Distribution = .1  # RBF output scale; 0 = no RBF part
     lengthscale: float | Distribution | None = .1  # RBF lengthscale; required if outputscale can be > 0
     bias: float | Distribution = 0.  # constant kernel offset (intercept variance); 0 = none
+    periodic_outputscale: float | Distribution = 0.  # Exp-Sine-Squared output scale; 0 = no periodic part
+    period: float | Distribution | None = None  # period; required if periodic_outputscale can be > 0
+    periodic_lengthscale: float | Distribution | None = None  # smoothness within a period; small = more harmonics
+    periodic_decay: float | Distribution | None = None  # lengthscale of the RBF factor; None = exactly periodic
 
 
 @dataclass
@@ -127,12 +131,19 @@ def _hyperparameter_checks(hp):
             checks += [(value.low <= value.high, f'{path}: low must be <= high, got {value}'),
                        (value.dist != 'log_uniform' or value.low > 0, f'{path}: log_uniform requires low > 0')]
     low = {f.name: _bounds(getattr(hp, f.name))[0] for f in fields(hp) if getattr(hp, f.name) is not None}
+    periodic_on = _bounds(hp.periodic_outputscale)[1] > 0
     checks += [
         (low['noise'] > 0, 'prior.hyperparameters.noise must be > 0'),
-        (min(low['variance'], low['outputscale'], low['bias']) >= 0,
-         'prior.hyperparameters.variance, outputscale and bias must be >= 0'),
+        (min(low['variance'], low['outputscale'], low['bias'], low['periodic_outputscale']) >= 0,
+         'prior.hyperparameters.variance, outputscale, bias and periodic_outputscale must be >= 0'),
         (_bounds(hp.outputscale)[1] == 0 or (hp.lengthscale is not None and low['lengthscale'] > 0),
          'prior.hyperparameters.lengthscale must be > 0 (not null) if outputscale can be > 0'),
+        (not periodic_on or all(getattr(hp, k) is not None and low[k] > 0
+                                for k in ('period', 'periodic_lengthscale')),
+         'prior.hyperparameters.period and periodic_lengthscale must be > 0 (not null) '
+         'if periodic_outputscale can be > 0'),
+        (hp.periodic_decay is None or low['periodic_decay'] > 0,
+         'prior.hyperparameters.periodic_decay must be > 0 or null'),
     ]
     return checks
 
