@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 
 .idea
+
+# M4 competition data (download: see .github/memory/evaluation_datasets.md)
+datasets/m4/

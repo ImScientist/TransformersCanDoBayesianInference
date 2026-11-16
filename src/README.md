@@ -28,6 +28,7 @@ MCMC, no hyperparameter fitting, no matrix inversion.
 | `transformer.py` | The PFN transformer (`BaseTransformerModel`) with a Gaussian output head (`GaussianTransformerModel`). Also contains a Beta-Binomial head that is not yet used for training. |
 | `train.py` | Training loop, saving/loading of runs and the command-line interface (`python -m src.train`). |
 | `inference.py` | Batched inference for datasets of different sizes (padding + per-dataset mask: `pad_datasets`, `predict`) and a demo on synthetic forecasting data (`python -m src.inference`). |
+| `evaluate_m4.py` | Evaluation on the M4 competition data in `datasets/m4/` (not in git; download from github.com/Mcompetitions/M4-methods, folder `Dataset/`): sMAPE, MASE, OWA, MSIS against naive/drift baselines (`python -m src.evaluate_m4 --checkpoint DIR --frequency Yearly`). |
 | `utils.py` | Device selection, learning-rate schedule, `single_eval_pos` samplers, `SeqBN`, and `get_batch_to_dataloader` (turns a `get_batch` function into a data loader). |
 | `positional_encodings.py` | `NoPositionalEncoding`: the identity. The PFN must not depend on the order of the context points, so no positional information is added. |
 
@@ -104,6 +105,7 @@ are not checked on assignment. They are checked by `load_config`, `config_from_d
 | | `device` | null | Device for sampling the prior (null = automatic). |
 | | `sampling_method` | auto | `basis` (only `num_features == 1`; fast, see below), `cholesky` (exact, any `num_features`), `auto` = `basis` if `num_features == 1`, else `cholesky`. |
 | | `basis_tol` | 1e-4 | Accuracy of the `basis` method, in [1e-6, 0.1]. |
+| | `forecast_prob` | 0 | Fraction of datasets whose `x` is sorted, so that the context holds the smallest and the queries the largest `x` (forecasting instead of interpolation); requires `num_features == 1`; no effect with `equidistant_x` (already sorted). |
 | | `hyperparameters` | see below | GP hyperparameters. |
 | `model` | `emsize` | 512 | Embedding size; must be divisible by `nhead`. |
 | | `nhid` | null | Hidden size of the feed-forward layers and the decoder MLP (null = `2 * emsize`). |
@@ -172,7 +174,8 @@ switches a kernel part off for a fraction of the datasets. It is allowed for `va
 
 - `linear_gp.yaml`: linear-trend GP on an equidistant 1D grid (only the differences from the defaults).
 - `gp_hyperprior.yaml`: lists **every** setting, with hyperpriors (including zero-inflated ones) for all
-  kernel parts, including the periodic part. A good template for new experiments.
+  kernel parts, including the periodic part. Half of the datasets are forecasting tasks (`forecast_prob: 0.5`).
+  A good template for new experiments.
 
 ## The prior (`prior.py`)
 
@@ -187,6 +190,9 @@ x, y, target_y = get_batch(batch_size=8, seq_len=20, num_features=1, device='cpu
 - `hyperparameters` can be a `GPHyperparameters` object, a dict (validated into one; missing keys take
   the defaults, unknown keys raise) or `None` (all defaults).
 - Inputs are uniform in [0, 1]^num_features (or an equidistant grid with `equidistant_x=True`).
+- With `forecast_prob=p`, the `x` values of each dataset are sorted with probability `p`. The split at
+  `single_eval_pos` then turns into "past → future", so the model learns to forecast. Because there is no
+  positional encoding, sorting does not make token positions matter, and the attention mask stays the same.
 - `sample_hyperparameters(hp, batch_size)` returns one tensor of shape `(batch_size,)` per hyperparameter.
 - `DataLoader = get_batch_to_dataloader(get_batch)` is a data loader that yields `num_steps` freshly
   sampled batches `((x, y), target_y)` per epoch.
