@@ -27,6 +27,7 @@ MCMC, no hyperparameter fitting, no matrix inversion.
 | `prior.py` | The GP prior: hyperparameter sampling, batched kernel, `get_batch` and the `DataLoader` used for training. |
 | `transformer.py` | The PFN transformer (`BaseTransformerModel`) with a Gaussian output head (`GaussianTransformerModel`). Also contains a Beta-Binomial head that is not yet used for training. |
 | `train.py` | Training loop, saving/loading of runs and the command-line interface (`python -m src.train`). |
+| `inference.py` | Batched inference for datasets of different sizes (padding + per-dataset mask: `pad_datasets`, `predict`) and a demo on synthetic forecasting data (`python -m src.inference`). |
 | `utils.py` | Device selection, learning-rate schedule, `single_eval_pos` samplers, `SeqBN`, and `get_batch_to_dataloader` (turns a `get_batch` function into a data loader). |
 | `positional_encodings.py` | `NoPositionalEncoding`: the identity. The PFN must not depend on the order of the context points, so no positional information is added. |
 
@@ -228,6 +229,11 @@ with the shapes above can be wrapped with `src.utils.get_batch_to_dataloader` an
   `mean` and `var = softplus(raw) + min_var`. Its loss is `model.criterion = nn.GaussianNLLLoss(full=True)`.
 - `forward((x, y), single_eval_pos)` returns `(mean, var)`, each of shape
   `(seq_len - single_eval_pos, batch_size)`. The `y` values at query positions are ignored.
+- Optional `src_key_padding_mask` (bool, `(batch_size, seq_len)`, True = padding): no token attends to a
+  padded token, so datasets with different numbers of context/query points can share a batch and get the
+  same predictions as on their own. `add_padding_to_mask` turns it into a per-dataset mask of shape
+  `(batch_size * nhead, seq_len, seq_len)`. Padded tokens still attend to themselves, which keeps every
+  attention row finite. Padded inputs must be finite (e.g. 0).
 
 ## Training (`train.py`)
 
@@ -276,6 +282,24 @@ with torch.no_grad():
 
 Keep inputs in the range the model was trained on (`x` in [0, 1], y on the scale of the prior) and the
 number of context points below `bptt`. The model has only seen such datasets.
+
+#### Datasets of different sizes in one batch (`inference.py`)
+
+```python
+from src.inference import pad_datasets, predict
+
+# contexts: list of (x (n_i, num_features), y (n_i,)); queries: list of x (m_i, num_features)
+predictions = predict(model, contexts, queries, batch_size=256)  # list of (mean, var), each (m_i,)
+
+batch = pad_datasets(contexts, queries)   # x, y, single_eval_pos, src_key_padding_mask, query_mask
+mean, var = model((batch['x'], batch['y']), single_eval_pos=batch['single_eval_pos'],
+                  src_key_padding_mask=batch['src_key_padding_mask'])  # valid where batch['query_mask']
+```
+
+Context points are left-padded and queries right-padded. `python -m src.inference --checkpoint DIR` runs a
+demo: it samples series of different lengths from the run's prior, forecasts the last points and checks
+that the padded batch matches predicting one series at a time (about 1e-6). It also shows how much worse
+the predictions are without the mask, because padded `(0, 0)` tokens then act as observations.
 
 ## Docker
 
