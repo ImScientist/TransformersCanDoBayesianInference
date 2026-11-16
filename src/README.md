@@ -67,8 +67,8 @@ Command-line arguments:
 - `--print_config`: print the resolved config and exit.
 
 The device is chosen automatically (CUDA, then Apple MPS, then CPU) unless `training.device` or
-`prior.device` is set. **MPS has no float64**, so sampling the GP prior on MPS can be numerically unstable
-for very small noise; use `prior.device=cpu` if you see "not p.d." warnings or errors.
+`prior.device` is set. **MPS has no float64**, so sampling the GP prior with the Cholesky method on MPS can be
+numerically unstable for very small noise; use `prior.device=cpu` if you see "not p.d." warnings or errors.
 
 ## Configuration (`config.py`)
 
@@ -101,6 +101,8 @@ are not checked on assignment. They are checked by `load_config`, `config_from_d
 | `prior` | `num_features` | 1 | Dimension of `x`. |
 | | `equidistant_x` | false | `x` on an equidistant grid in [0, 1] instead of uniform random; requires `num_features == 1`. |
 | | `device` | null | Device for sampling the prior (null = automatic). |
+| | `sampling_method` | auto | `basis` (only `num_features == 1`; fast, see below), `cholesky` (exact, any `num_features`), `auto` = `basis` if `num_features == 1`, else `cholesky`. |
+| | `basis_tol` | 1e-4 | Accuracy of the `basis` method, in [1e-6, 0.1]. |
 | | `hyperparameters` | see below | GP hyperparameters. |
 | `model` | `emsize` | 512 | Embedding size; must be divisible by `nhead`. |
 | | `nhid` | null | Hidden size of the feed-forward layers and the decoder MLP (null = `2 * emsize`). |
@@ -185,10 +187,30 @@ x, y, target_y = get_batch(batch_size=8, seq_len=20, num_features=1, device='cpu
   the defaults, unknown keys raise) or `None` (all defaults).
 - Inputs are uniform in [0, 1]^num_features (or an equidistant grid with `equidistant_x=True`).
 - `sample_hyperparameters(hp, batch_size)` returns one tensor of shape `(batch_size,)` per hyperparameter.
-  `dot_product_rbf_covariance(x, ...)` builds the `(batch_size, n, n)` covariance from these tensors.
-  Sampling uses a jitter-safe Cholesky (`linear_operator.psd_safe_cholesky`).
 - `DataLoader = get_batch_to_dataloader(get_batch)` is a data loader that yields `num_steps` freshly
   sampled batches `((x, y), target_y)` per epoch.
+
+**Sampling methods** (`get_batch(sampling_method=...)`, config `prior.sampling_method`):
+
+| Method | How | Cost per dataset | Accuracy |
+|---|---|---|---|
+| `cholesky` | `dot_product_rbf_covariance(x, ...)` builds the `(batch_size, n, n)` covariance; samples via a jitter-safe Cholesky (`linear_operator.psd_safe_cholesky`). | O(n²) memory, O(n³) time | exact (jitter may raise the effective noise to ~1e-4 in float32) |
+| `basis` (`num_features == 1`) | `sample_basis_1d`: each kernel part is sampled directly as a random combination of basis functions, without any matrix. | O(n) | see below |
+
+How the `basis` method samples each part:
+- Linear (`√variance·w·x`), bias (`√bias·z`) and noise: exact.
+- Periodic: exact Fourier series (`periodic_fourier_coefficients`), truncated once the missing variance is below
+  `basis_tol`. Small `periodic_lengthscale` values need more harmonics (about 8 for 0.5, about 40 for 0.1).
+- RBF: Hilbert-space approximation (`rbf_basis_1d`; Solin & Särkkä, 2020). The data interval is padded so that
+  boundary effects stay below `basis_tol`, and enough sine basis functions are used for the spectral
+  truncation error to stay below `basis_tol` too (about 30 for `rbf_lengthscale=0.05`). The kernel error is about
+  1–2 × `basis_tol`.
+- Periodic × RBF (`periodic_decay`): every harmonic gets an independent RBF-process amplitude, which gives exactly
+  the locally periodic kernel (up to the RBF approximation).
+
+At `bptt=1024`, `batch_size=500` on a CPU, sampling a batch takes 0.02 s with `basis` and 6.5 s with `cholesky`.
+The two methods produce different batches for the same seed. To reproduce a run trained before
+`sampling_method` existed, set `prior.sampling_method=cholesky`.
 
 **Custom priors.** Any function `get_batch(batch_size, seq_len, num_features, **kwargs) -> (x, y, target_y)`
 with the shapes above can be wrapped with `src.utils.get_batch_to_dataloader` and passed to

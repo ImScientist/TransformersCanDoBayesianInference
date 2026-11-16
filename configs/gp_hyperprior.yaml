@@ -8,6 +8,8 @@ prior:
   num_features: 1
   equidistant_x: false  # true = x on an equidistant grid in [0, 1]; requires num_features == 1
   device: null  # device for sampling the prior; null = default device (use cpu if MPS is unstable)
+  sampling_method: auto  # auto = basis if num_features == 1 else cholesky; basis: O(bptt), cholesky: exact, O(bptt^3)
+  basis_tol: 1.e-4  # accuracy of the basis method (RBF approximation, Fourier truncation); in [1e-6, 0.1]
   hyperparameters:
     # Kernel: bias + variance * x^T x' + rbf_outputscale * RBF(rbf_lengthscale)
     #         + periodic_outputscale * ExpSineSquared(period, periodic_lengthscale) [* RBF(periodic_decay)]
