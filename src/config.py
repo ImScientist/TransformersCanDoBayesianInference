@@ -140,12 +140,17 @@ class PriorConfig(_Config):
     num_features: PositiveInt = 1
     equidistant_x: bool = False
     device: str | None = None  # device for sampling the prior; None = `default_device` (use 'cpu' if MPS is unstable)
+    # 'auto' = 'basis' if num_features == 1 else 'cholesky'; see `src.prior.get_batch`
+    sampling_method: Literal['auto', 'basis', 'cholesky'] = 'auto'
+    basis_tol: Annotated[float, Field(ge=1e-6, le=0.1)] = 1e-4  # accuracy of the 'basis' method (float32 limit ~1e-6)
     hyperparameters: GPHyperparameters = Field(default_factory=GPHyperparameters)
 
     @model_validator(mode='after')
     def _check(self) -> Self:
         if self.equidistant_x and self.num_features != 1:
             raise ValueError('equidistant_x requires num_features == 1')
+        if self.sampling_method == 'basis' and self.num_features != 1:
+            raise ValueError("sampling_method='basis' requires num_features == 1")
         return self
 
 
