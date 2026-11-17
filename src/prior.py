@@ -243,7 +243,8 @@ def get_batch(
         hyperparameters: GPHyperparameters | dict | None = None,
         equidistant_x: bool = False,
         sampling_method: str = 'auto',
-        basis_tol: float = 1e-4
+        basis_tol: float = 1e-4,
+        forecast_prob: float = 0.
 ):
     """Sample `batch_size` datasets from the GP prior (zero mean, kernel of `dot_product_rbf_covariance`).
 
@@ -257,6 +258,11 @@ def get_batch(
     :param sampling_method: 'cholesky' (exact, any `num_features`, O(seq_len^3)), 'basis' (`sample_basis_1d`,
         `num_features == 1` only, O(seq_len)) or 'auto' ('basis' if `num_features == 1`, else 'cholesky')
     :param basis_tol: accuracy of the 'basis' method (see `sample_basis_1d`)
+    :param forecast_prob: probability per dataset that its x values are sorted along the sequence
+        (`num_features == 1` only). The first `single_eval_pos` points are then the smallest x (context) and the
+        rest the largest (queries), i.e. a forecasting task; otherwise the split is random (interpolation).
+        The model has no positional encoding, so sorting changes nothing else. No effect with `equidistant_x`
+        (already sorted).
     :return: x: (seq_len, batch_size, num_features), y and target_y (identical): (seq_len, batch_size)
     """
     if not isinstance(hyperparameters, GPHyperparameters):
@@ -267,6 +273,10 @@ def get_batch(
         raise ValueError(f"sampling_method must be 'auto', 'basis' or 'cholesky', got {sampling_method!r}")
     if sampling_method == 'basis' and num_features != 1:
         raise ValueError("sampling_method='basis' requires num_features == 1")
+    if not 0 <= forecast_prob <= 1:
+        raise ValueError(f'forecast_prob must be in [0, 1], got {forecast_prob}')
+    if forecast_prob > 0 and num_features != 1:
+        raise ValueError('forecast_prob > 0 requires num_features == 1')
 
     # -> (batch_size, seq_len, num_feat)
     if equidistant_x:
@@ -274,6 +284,9 @@ def get_batch(
         x = torch.linspace(0, 1, seq_len, device=device)[:, None].repeat(batch_size, 1, 1)
     else:
         x = torch.rand(batch_size, seq_len, num_features, device=device)
+        if forecast_prob > 0:  # no extra random numbers otherwise (batches stay reproducible)
+            is_forecast = torch.rand(batch_size, device=device) < forecast_prob
+            x = torch.where(is_forecast[:, None, None], x.sort(dim=1).values, x)
 
     hp = sample_hyperparameters(hyperparameters, batch_size, device=device)
     kernel_hp = (hp['variance'], hp['rbf_outputscale'], hp['rbf_lengthscale'], hp['bias'],

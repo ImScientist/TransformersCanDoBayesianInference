@@ -104,6 +104,7 @@ def train(
                     'equidistant_x': p.equidistant_x,
                     'sampling_method': p.sampling_method,
                     'basis_tol': p.basis_tol,
+                    'forecast_prob': p.forecast_prob,
                     'hyperparameters': p.hyperparameters}
     if p.device is not None:
         prior_kwargs['device'] = p.device

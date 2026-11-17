@@ -69,6 +69,25 @@ class BaseTransformerModel(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
+    @staticmethod
+    def add_padding_to_mask(src_mask, src_key_padding_mask, nhead):
+        """Combine the shared attention mask with a per-sample padding mask.
+
+        No token attends to a padded token, so every real token's output equals the one of the same dataset
+        without padding. Padded tokens may still attend to themselves; this keeps every attention row
+        finite (a fully masked row gives NaN, and NaN values leak into other rows even with weight 0).
+
+        :param src_mask: float mask (seq_len, seq_len), 0 = allowed, -inf = masked
+        :param src_key_padding_mask: bool (batch_size, seq_len), True = padding
+        :param nhead: number of attention heads
+        :return: float mask (batch_size * nhead, seq_len, seq_len), the layout expected by `nn.TransformerEncoder`
+        """
+        batch_size, seq_len = src_key_padding_mask.shape
+        mask = src_mask.expand(batch_size, seq_len, seq_len).masked_fill(
+            src_key_padding_mask[:, None, :], float('-inf'))
+        mask.diagonal(dim1=1, dim2=2).masked_fill_(src_key_padding_mask, 0.)
+        return mask.repeat_interleave(nhead, dim=0)
+
     def init_weights(self):
         # Zero the residual-branch outputs so every encoder layer starts as the identity.
         for layer in self.transformer_encoder.layers:
@@ -77,11 +96,15 @@ class BaseTransformerModel(nn.Module):
             nn.init.zeros_(layer.self_attn.out_proj.weight)
             nn.init.zeros_(layer.self_attn.out_proj.bias)
 
-    def forward(self, src, src_mask=None, single_eval_pos=None):
+    def forward(self, src, src_mask=None, single_eval_pos=None, src_key_padding_mask=None):
         """
         :param src: tuple `(x, y)` with x: (seq_len, batch_size, num_features), y: (seq_len, batch_size)
-        :param src_mask: optional attention mask; defaults to `generate_D_q_matrix`
+        :param src_mask: optional attention mask (seq_len, seq_len); defaults to `generate_D_q_matrix`
         :param single_eval_pos: number of training (context) positions; positions from here on are queries
+        :param src_key_padding_mask: optional bool (batch_size, seq_len), True = padded position. Lets datasets
+            with different numbers of context / query points share a batch (see `add_padding_to_mask`).
+            Padded inputs must be finite (e.g. 0); outputs at padded query positions are meaningless.
+            With `input_normalization` use eval mode, otherwise padding enters the batch-norm statistics.
         :return: `self.postprocess(output)` of the decoder output at the query positions,
             output shape: (seq_len - single_eval_pos, batch_size, n_out)
         """
@@ -91,6 +114,13 @@ class BaseTransformerModel(nn.Module):
 
         if src_mask is None:
             src_mask = self.generate_D_q_matrix(len(x_src), len(x_src) - single_eval_pos).to(x_src.device)
+
+        if src_key_padding_mask is not None:
+            assert src_key_padding_mask.dtype == torch.bool, 'src_key_padding_mask must be a bool tensor.'
+            assert src_key_padding_mask.shape == x_src.shape[1::-1], \
+                f'src_key_padding_mask must have shape (batch_size, seq_len) = {tuple(x_src.shape[1::-1])}.'
+            nhead = self.transformer_encoder.layers[0].self_attn.num_heads
+            src_mask = self.add_padding_to_mask(src_mask, src_key_padding_mask.to(src_mask.device), nhead)
 
         x_src = self.encoder(x_src)
         y_src = self.y_encoder(y_src.unsqueeze(-1))
