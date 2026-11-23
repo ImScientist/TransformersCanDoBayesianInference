@@ -125,6 +125,7 @@ are not checked on assignment. They are checked by `load_config`, `config_from_d
 | | `eval_pos_sampling` | weighted | `weighted`: position `i` has weight `1 / (max_eval_pos - i)`, so every query point is equally likely to be seen with any context size. `uniform`: all positions equally likely. |
 | | `seed` | null | null = a random seed is drawn and written into the saved config. |
 | | `device` | null | Device for the model (null = automatic). |
+| | `checkpoint_every` | null | Save `checkpoints/model_epoch_XXXX.pt` every n epochs (needs `--output_dir`). null = `epochs`, i.e. only the final `model.pt`. |
 
 ### GP hyperparameters (`prior.hyperparameters`)
 
@@ -267,6 +268,10 @@ save_run('outputs/notebook_run', cfg, model, loss, pos_losses, metadata)
   to reproduce the run.
 - `metadata.yaml`: timestamp, git commit and dirty flag, Python/torch/gpytorch/CUDA versions, final losses.
 - `model.pt`: `{'state_dict', 'config', 'metadata'}`.
+- `checkpoints/model_epoch_XXXX.pt` (only with `training.checkpoint_every=n`): intermediate checkpoints
+  after every n epochs, excluding the last epoch, which is saved as `model.pt`. They use the same format, and
+  their metadata records the `epoch` and the loss of that epoch. Load one with
+  `load_checkpoint('DIR/checkpoints/model_epoch_0010.pt')`.
 
 ### Using a trained model
 

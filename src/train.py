@@ -14,6 +14,7 @@ Run from the repository root, e.g.:
 
 With `--output_dir`, the run folder contains `config.yaml` (resolved config, reusable with `--config`),
 `metadata.yaml` (git commit, library versions, final losses) and `model.pt` (see `load_checkpoint`).
+With `training.checkpoint_every=n`, `checkpoints/model_epoch_XXXX.pt` is also written every n epochs (same format).
 """
 import argparse
 import datetime
@@ -65,7 +66,8 @@ def train(
         decoder=None,
         scheduler=get_cosine_schedule_with_warmup,
         load_weights_from_this_state_dict=None,
-        verbose=True
+        verbose=True,
+        checkpoint_fn=None
 ):
     """Train a PFN with Gaussian NLL loss.
 
@@ -76,6 +78,8 @@ def train(
         (default: GP prior from `src/prior.py`)
     :param decoder: optional decoder factory `decoder(ninp, nhid, n_out)` (not part of the config)
     :param scheduler: factory `scheduler(optimizer, warmup_epochs, epochs)`, stepped once per epoch
+    :param checkpoint_fn: optional `checkpoint_fn(epoch, model, total_loss, total_positional_losses)`, called
+        after every `config.training.checkpoint_every` epochs except the last one (the returned model is final)
     :return: (mean loss of the last epoch, mean loss per single_eval_pos of the last epoch, model on CPU)
     """
     config = config or TrainConfig()
@@ -186,6 +190,10 @@ def train(
 
         scheduler.step()
 
+        checkpoint_every = t.checkpoint_every or epochs
+        if checkpoint_fn is not None and epoch % checkpoint_every == 0 and epoch < epochs:
+            checkpoint_fn(epoch, model, total_loss, total_positional_losses)
+
     return total_loss, total_positional_losses, model.to('cpu')
 
 
@@ -212,14 +220,29 @@ def run_metadata():
     }
 
 
+def save_checkpoint(path, config, model, metadata):
+    """Write model weights (on CPU), config and metadata to `path` (readable by `load_checkpoint`)."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    torch.save({'state_dict': {k: v.detach().cpu() for k, v in model.state_dict().items()},
+                'config': config_to_dict(config),
+                'metadata': metadata}, path)
+
+
+def save_intermediate_checkpoint(output_dir, config, metadata, epoch, model, total_loss, total_positional_losses):
+    """Write `output_dir/checkpoints/model_epoch_XXXX.pt` (same format as the final `model.pt`)."""
+    path = os.path.join(output_dir, 'checkpoints', f'model_epoch_{epoch:04d}.pt')
+    save_checkpoint(path, config, model, {**metadata, 'epoch': epoch, 'total_loss': total_loss,
+                                          'total_positional_losses': total_positional_losses})
+    print(f'Saved checkpoint to {path}')
+
+
 def save_run(output_dir, config, model, total_loss, total_positional_losses, metadata):
     """Write `config.yaml`, `metadata.yaml` and `model.pt` to `output_dir`."""
     os.makedirs(output_dir, exist_ok=True)
-    metadata = {**metadata, 'total_loss': total_loss, 'total_positional_losses': total_positional_losses}
+    metadata = {**metadata, 'epoch': config.training.epochs, 'total_loss': total_loss,
+                'total_positional_losses': total_positional_losses}
     # model.pt first: it is the most valuable file if anything below fails.
-    torch.save({'state_dict': model.state_dict(),
-                'config': config_to_dict(config),
-                'metadata': metadata}, os.path.join(output_dir, 'model.pt'))
+    save_checkpoint(os.path.join(output_dir, 'model.pt'), config, model, metadata)
     save_config(config, os.path.join(output_dir, 'config.yaml'))
     with open(os.path.join(output_dir, 'metadata.yaml'), 'w') as f:
         yaml.safe_dump(metadata, f, sort_keys=False)
@@ -268,7 +291,14 @@ if __name__ == '__main__':
 
     print('Config:\n' + yaml.safe_dump(config_to_dict(config), sort_keys=False))
     metadata = run_metadata()
-    total_loss, total_positional_losses, model = train(config)
+    checkpoint_fn = None
+    if args.output_dir is not None:
+        def checkpoint_fn(epoch, model, total_loss, total_positional_losses):
+            save_intermediate_checkpoint(args.output_dir, config, metadata, epoch, model, total_loss,
+                                         total_positional_losses)
+    elif config.training.checkpoint_every is not None:
+        print('Warning: training.checkpoint_every is ignored without --output_dir.')
+    total_loss, total_positional_losses, model = train(config, checkpoint_fn=checkpoint_fn)
 
     if args.output_dir is not None:
         save_run(args.output_dir, config, model, total_loss, total_positional_losses, metadata)

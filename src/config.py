@@ -190,6 +190,8 @@ class TrainingConfig(_Config):
     eval_pos_sampling: Literal['weighted', 'uniform'] = 'weighted'
     seed: int | None = None  # None = random seed, chosen and recorded by `train`
     device: str | None = None  # device for the model; None = `default_device` (CUDA, MPS, then CPU)
+    # Save an intermediate checkpoint every n epochs (needs --output_dir); None = epochs, i.e. only the final model
+    checkpoint_every: PositiveInt | None = None
 
     @model_validator(mode='after')
     def _check(self) -> Self:
