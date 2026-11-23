@@ -2,7 +2,7 @@
 # Every available setting is listed with a short explanation. Values marked "(changed)" differ from the defaults
 # in `src/config.py` (the single source of defaults and constraints); all others are the defaults, so deleting a
 # line leaves the config unchanged. Print the resolved config with
-#   python -m src.train --config configs/linear_gp.yaml --print_config
+#   python -m src.train --config configs/quickstart_linear_gp.yaml --print_config
 # Any value can be overridden on the command line, e.g. `training.epochs=5 prior.hyperparameters.noise=0.1`.
 
 prior:                          # the GP prior the training datasets are sampled from (`src/prior.py`)
