@@ -10,16 +10,17 @@ prior:
   device: null  # device for sampling the prior; null = default device (use cpu if MPS is unstable)
   sampling_method: auto  # auto = basis if num_features == 1 else cholesky; basis: O(bptt), cholesky: exact, O(bptt^3)
   basis_tol: 1.e-4  # accuracy of the basis method (RBF approximation, Fourier truncation); in [1e-6, 0.1]
+  forecast_prob: 0.5  # fraction of datasets with sorted x: context = smallest x, queries = largest x (forecasting)
   hyperparameters:
     # Kernel: bias + variance * x^T x' + rbf_outputscale * RBF(rbf_lengthscale)
     #         + periodic_outputscale * ExpSineSquared(period, periodic_lengthscale) [* RBF(periodic_decay)]
     noise: { dist: log_uniform, low: 1.e-4, high: 0.1 }  # observation noise variance; > 0
-    variance: { dist: log_uniform, low: 0.1, high: 10.0, zero_prob: 0.2 }  # linear (dot-product) part; >= 0
-    rbf_outputscale: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.2 }  # 0 = no RBF part
+    variance: { dist: log_uniform, low: 0.1, high: 30.0, zero_prob: 0.2 }  # linear (dot-product) part; >= 0; standardised steep trends need slopes ~4
+    rbf_outputscale: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.5 }  # 0 = no RBF part
     rbf_lengthscale: { dist: log_uniform, low: 0.05, high: 1.0 }  # > 0 if rbf_outputscale can be > 0
-    bias: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.2 }  # constant offset (intercept variance); 0 = none
-    periodic_outputscale: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.2 }  # 0 = no periodic part
-    period: { dist: log_uniform, low: 0.1, high: 1.0 }  # > 0 if periodic_outputscale can be > 0 (x in [0, 1])
+    bias: { dist: uniform, low: 0.0, high: 3.0, zero_prob: 0.2 }  # constant offset (intercept variance); 0 = none
+    periodic_outputscale: { dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.25 }  # 0 = no periodic part
+    period: { dist: log_uniform, low: 0.03, high: 1.0 }  # > 0 if periodic_outputscale can be > 0 (x in [0, 1])
     periodic_lengthscale: { dist: log_uniform, low: 0.5, high: 2.0 }  # smoothness within a period; small = more harmonics
     periodic_decay: null  # lengthscale of the RBF factor (locally periodic); null = exactly periodic
 
@@ -33,7 +34,7 @@ model:
   min_var: 1.e-6  # lower bound of the predicted variance
 
 training:
-  bptt: 12  # sequence length (training + query points) of each sampled dataset; >= 2
+  bptt: 64  # sequence length (training + query points) of each sampled dataset; >= 2
   epochs: 50
   steps_per_epoch: 100  # must be divisible by optim.aggregate_k_gradients
   batch_size: 500
@@ -41,6 +42,10 @@ training:
   eval_pos_sampling: weighted  # weighted | uniform
   seed: null  # null = random seed (chosen and recorded by train)
   device: null  # device for the model; null = default device (CUDA, MPS, then CPU)
+  checkpoint_every: null  # save checkpoints/model_epoch_XXXX.pt every n epochs; null = epochs (only model.pt)
+  tensorboard: true  # write TensorBoard logs to <output_dir>/tensorboard
+  gp_benchmark: benchmarks/gp_benchmark_v1.npz  # exact-GP benchmark logged during training; null = none
+  gp_benchmark_every: 5  # evaluate gp_benchmark every n epochs and after the last; null = only after the last
 
 optim:
   lr: 0.0003  # null = get_openai_lr(model)

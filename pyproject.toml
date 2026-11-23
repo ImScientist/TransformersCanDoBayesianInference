@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=2.5.3",
     "pydantic>=2.14.3",
     "omegaconf>=2.4.0",
+    "tensorboard>=2.21.0",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +35,7 @@ legacy = [
 ]
 
 [dependency-groups]
-# Notebook / plotting tools; installed by `uv sync` by default, excluded with `--no-dev` (Docker image).
+# Notebook / plotting tools; installed by `uv sync` by default (also in the Docker image), excluded with `--no-dev`.
 dev = [
     "jupyter>=1.1.1",
     "seaborn>=0.13.2",

@@ -6,12 +6,12 @@
 #
 # Build (on an Apple Silicon Mac, cross-build for the Linux/x86_64 GPU machine):
 #   docker buildx build --platform linux/amd64 -t pfn-train .
-# Run on the GPU machine (the run folder with config.yaml, metadata.yaml and model.pt is written to the
-# mounted ./outputs directory; configs/ is part of the image):
-#   docker run --rm --gpus all -v "$PWD/outputs:/app/outputs" pfn-train \
-#       --config configs/linear_gp.yaml training.epochs=50 --output_dir outputs/run1
-# New configs can be used without rebuilding by mounting them, e.g.
-#   -v "$PWD/configs:/app/configs" pfn-train --config configs/my_run.yaml --output_dir outputs/run2
+# Run on the GPU machine. configs/ and benchmarks/ are not part of the image: mount them from the host (they must
+# exist on the machine that runs the container, e.g. a repository checkout). The run folder with config.yaml,
+# metadata.yaml, model.pt and tensorboard/ is written to the mounted ./outputs directory:
+#   docker run --rm --gpus all \
+#       -v "$PWD/configs:/app/configs:ro" -v "$PWD/benchmarks:/app/benchmarks:ro" -v "$PWD/outputs:/app/outputs" \
+#       pfn-train --config configs/gp_hyperprior.yaml training.epochs=50 --output_dir outputs/run1
 
 FROM python:3.12-slim-bookworm
 
@@ -27,17 +27,17 @@ WORKDIR /app
 
 # Install dependencies first (cached layer; only rebuilt when pyproject.toml / uv.lock change).
 # --frozen: install exactly what uv.lock specifies, fail instead of re-resolving.
-# --no-dev: skip the `dev` dependency group (jupyter, seaborn); optional extras are skipped by default.
+# Installs `dependencies` and the `dev` group (jupyter, seaborn; included by default).
+# The optional extras `baselines` and `legacy` are skipped (uv only installs extras requested with --extra).
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=.python-version,target=.python-version \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project
 
 ENV PATH="/app/.venv/bin:$PATH"
 
 COPY src ./src
-COPY configs ./configs
 
 ENTRYPOINT ["python", "-m", "src.train"]
 CMD ["--help"]
