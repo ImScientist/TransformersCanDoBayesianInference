@@ -1,6 +1,7 @@
 """Evaluate a trained PFN on the M4 competition data (one frequency, e.g. the 23,000 yearly series).
 
-Data: `datasets/m4/{Train,Test}/<Frequency>-{train,test}.csv` from github.com/Mcompetitions/M4-methods (Dataset/).
+Data: `datasets/m4/{Train,Test}/<Frequency>-{train,test}.csv` from github.com/Mcompetitions/M4-methods (Dataset/);
+download with `python -m src.download_m4 [--frequencies Yearly]`.
 
 Per series:
   - context: the last `min(len, bptt - horizon)` observations (the model has seen at most `bptt` points),

@@ -1,6 +1,7 @@
 """PFN Transformer model.
 
-Copied from `transformer.py`, without the legacy `fuse_x_y` option: the input is always an
+Copied from `transformer.py` of github.com/automl/TransformersCanDoBayesianInference (Apache-2.0) and modified.
+The legacy `fuse_x_y` option was removed: the input is always an
 `(x, y)` tuple and `single_eval_pos` is always required. Removing that option also removed
 the code paths for `single_eval_pos=None` (causal mask, interleaved x/y tokens). They could
 not be reached anyway. There is no positional encoding: the model must not depend on the order of the

@@ -1,7 +1,11 @@
 # `src/`: training a Prior-Fitted Network (PFN) on a Gaussian-process prior
 
 This package trains a transformer to do **approximate Bayesian inference for regression in a single forward
-pass**. The approach comes from *Transformers Can Do Bayesian Inference* (Müller et al., ICLR 2022).
+pass**. The approach comes from *Transformers Can Do Bayesian Inference* (Müller et al., ICLR 2022,
+[arXiv:2112.10510](https://arxiv.org/abs/2112.10510)). The code started as a minimal, refactored subset of the
+paper's code ([automl/TransformersCanDoBayesianInference](https://github.com/automl/TransformersCanDoBayesianInference),
+Apache-2.0), restricted to 1D regression with Gaussian-process priors and a Gaussian output. See
+"Origin, license and citation" at the end.
 
 ## The idea in short
 
@@ -28,13 +32,24 @@ MCMC, no hyperparameter fitting, no matrix inversion.
 | `transformer.py` | The PFN transformer (`BaseTransformerModel`) with a Gaussian output head (`GaussianTransformerModel`). Also contains a Beta-Binomial head that is not yet used for training. |
 | `train.py` | Training loop, saving/loading of runs and the command-line interface (`python -m src.train`). |
 | `inference.py` | Batched inference for datasets of different sizes (padding + per-dataset mask: `pad_datasets`, `predict`) and a demo on synthetic forecasting data (`python -m src.inference`). |
-| `evaluate_m4.py` | Evaluation on the M4 competition data in `datasets/m4/` (not in git; download from github.com/Mcompetitions/M4-methods, folder `Dataset/`): sMAPE, MASE, OWA, MSIS against naive/drift baselines (`python -m src.evaluate_m4 --checkpoint DIR --frequency Yearly`). |
+| `evaluate_m4.py` | Evaluation on the M4 competition data in `datasets/m4/` (not in git, see "Evaluation on M4"): sMAPE, MASE, OWA, MSIS against naive/drift baselines (`python -m src.evaluate_m4 --checkpoint DIR --frequency Yearly`). |
+| `download_m4.py` | Downloads the M4 CSV files from github.com/Mcompetitions/M4-methods (folder `Dataset/`) into `datasets/m4/` (`python -m src.download_m4`). |
 | `utils.py` | Device selection, learning-rate schedule, `single_eval_pos` samplers, `SeqBN`, and `get_batch_to_dataloader` (turns a `get_batch` function into a data loader). |
 | `gp_benchmark.py` | Comparison with the exact GP posterior on the stored benchmark `benchmarks/gp_benchmark_v1.npz` (fixed hyperparameter subsets): KL, NLL gap, error of mean and variance (`python -m src.gp_benchmark evaluate --checkpoint DIR`). |
 
+## Project layout
+
+| Folder | Content | In git |
+|---|---|---|
+| `src/` | The package (this README and `LICENSE`). | yes |
+| `configs/` | Example training configs (YAML), see "Example configs". | yes |
+| `benchmarks/` | `gp_benchmark_v1.npz`, the exact-GP benchmark (about 2 MB). | yes |
+| `datasets/m4/` | M4 competition data for `evaluate_m4.py` (`python -m src.download_m4`). | no |
+| `outputs/` | Run folders written by `python -m src.train --output_dir outputs/...`. | no |
+
 ## Setup
 
-All commands are run from the **repository root** (the folder that contains `src/`, `configs/`,
+All commands are run from the **repository root** (the folder that contains `src/`, `configs/`, `benchmarks/`,
 `pyproject.toml`). Dependencies are managed with [uv](https://docs.astral.sh/uv/):
 
 ```bash
@@ -65,8 +80,11 @@ Command-line arguments:
 - `--config FILE`: a YAML file. It can be given several times; files are merged in order.
 - `key.sub=value`: overrides a single value (parsed as YAML), e.g. `model.emsize=256`,
   `optim.lr=null`, or `prior.hyperparameters.noise={dist: uniform, low: 0.01, high: 0.1}`.
-- `--output_dir DIR` (required unless `--print_config` is given): the run folder. It must not already contain
-  a `model.pt`; this is checked before training starts.
+- `--output_dir DIR` (required unless `--resume` or `--print_config` is given): the run folder. It must not
+  already contain a `model.pt` (finished run) or a `checkpoints/last.pt` (interrupted run); this is checked
+  before training starts.
+- `--resume DIR`: continue the interrupted run in `DIR` (see "Resuming an interrupted run"). It cannot be
+  combined with `--config`, overrides or `--output_dir`.
 - `--print_config`: print the resolved config and exit.
 
 The device is chosen automatically (CUDA, then Apple MPS, then CPU) unless `training.device` or
@@ -253,6 +271,8 @@ in that epoch). It returns `(mean loss of last epoch, losses per position, model
 Optionally, `train(config, checkpoint_fn=f)` calls `f(epoch, model, loss, pos_losses)` after every
 `training.checkpoint_every` epochs (not after the last one); the CLI uses this to write intermediate checkpoints.
 `train(config, epoch_fn=g)` calls `g(epoch, metrics)` after every epoch (used for TensorBoard, see below).
+`train(config, state_fn=h)` calls `h(epoch, state)` after every epoch with the full training state, and
+`train(config, resume_state=state)` continues from such a state (used by `--resume`, see below).
 
 ```python
 from src.config import load_config
@@ -269,16 +289,36 @@ save_run('outputs/notebook_run', cfg, model, loss, pos_losses, metadata)
 
 `--output_dir DIR` (or `save_run`) writes:
 
-- `config.yaml`: the fully resolved config, including the seed. Reuse it with `--config DIR/config.yaml`
-  to reproduce the run.
+- `config.yaml`: the fully resolved config, including the seed; written when training starts (needed by
+  `--resume`). Reuse it with `--config DIR/config.yaml` to reproduce the run.
 - `metadata.yaml`: timestamp, git commit and dirty flag, Python/torch/gpytorch/CUDA versions, the last
-  `epoch` and the final losses.
+  `epoch` and the final losses; for a resumed run also `resumed` (epoch, timestamp and git commit of each
+  resumption).
 - `model.pt`: `{'state_dict', 'config', 'metadata'}`.
 - `checkpoints/model_epoch_XXXX.pt` (only with `training.checkpoint_every=n`): intermediate checkpoints
   after every n epochs, excluding the last epoch, which is saved as `model.pt`. They use the same format, and
   their metadata records the `epoch` and the loss of that epoch. Load one with
   `load_checkpoint('DIR/checkpoints/model_epoch_0010.pt')`.
 - `tensorboard/` (unless `training.tensorboard=false`): TensorBoard event file, see below.
+- `checkpoints/last.pt` (only while training): the full training state after the last completed epoch, used by
+  `--resume`. It is deleted when the run finishes.
+
+### Resuming an interrupted run
+
+The CLI writes `checkpoints/last.pt` after every epoch, replacing the previous one. It holds the weights, Adam
+state, learning-rate scheduler, epoch, losses, metadata and the random number states (python `random`, torch
+CPU, CUDA, MPS), so a resumed run draws the same batches and context sizes as an uninterrupted one. The file is
+written to a temporary file and then renamed, so an interruption while writing keeps the previous state.
+
+```bash
+python -m src.train --resume outputs/run5
+```
+
+`--resume` reads `DIR/config.yaml` and continues after the epoch stored in `last.pt`. The config cannot be
+changed (e.g. more epochs would change the learning-rate schedule). TensorBoard continues in the same folder; the
+values of epochs after `last.pt` (logged before the interruption) are discarded, so every curve is continuous.
+On CPU and MPS the result was verified to be identical (bitwise) to an uninterrupted run. On CUDA, kernels that
+are not deterministic can cause small differences. At most the epoch that was running is lost.
 
 ### Monitoring with TensorBoard
 
@@ -373,6 +413,30 @@ During training, `training.gp_benchmark=benchmarks/gp_benchmark_v1.npz` evaluate
 (see "Monitoring with TensorBoard"). `configs/gp_hyperprior.yaml` enables this every 5 epochs; one evaluation
 takes a few seconds (about 3 s for a small model on MPS). In Docker, mount `benchmarks/`.
 
+### Evaluation on M4 (`download_m4.py`, `evaluate_m4.py`)
+
+The M4 data are not in git. Download them once (standard library only, no extra dependencies):
+
+```bash
+python -m src.download_m4                        # all 6 frequencies + M4-info.csv (about 275 MB)
+python -m src.download_m4 --frequencies Yearly   # only what the Yearly evaluation needs (about 31 MB)
+```
+
+The files go to `datasets/m4/Train/<Frequency>-train.csv`, `datasets/m4/Test/<Frequency>-test.csv` and
+`datasets/m4/M4-info.csv` (`--data_dir` to change the folder). Existing files are skipped (`--force` downloads
+them again), and each file is written under a temporary name and renamed when complete, so an interrupted
+download can simply be restarted. Then evaluate a run:
+
+```bash
+python -m src.evaluate_m4 --checkpoint outputs/my_run --frequency Yearly
+python -m src.evaluate_m4 --checkpoint outputs/my_run --frequency Monthly --max_series 1000 \
+    --save_predictions outputs/my_run/m4_monthly.csv
+```
+
+It prints sMAPE, MASE and OWA of the PFN and of the naive, seasonal naive and drift baselines, plus the
+coverage and MSIS of the PFN's 95% interval. `--data_dir` must point to the same folder as for the download.
+In Docker, mount `datasets/` (e.g. `-v "$PWD/datasets:/app/datasets"`).
+
 ## Docker
 
 The `Dockerfile` in the repository root runs `python -m src.train` as its entry point:
@@ -382,9 +446,47 @@ docker buildx build --platform linux/amd64 -t pfn-train .
 docker run --rm --gpus all \
     -v "$PWD/configs:/app/configs:ro" -v "$PWD/benchmarks:/app/benchmarks:ro" -v "$PWD/outputs:/app/outputs" \
     pfn-train --config configs/gp_hyperprior.yaml training.epochs=50 --output_dir outputs/run1
+# after an interruption (same mounts):
+docker run --rm --gpus all \
+    -v "$PWD/configs:/app/configs:ro" -v "$PWD/benchmarks:/app/benchmarks:ro" -v "$PWD/outputs:/app/outputs" \
+    pfn-train --resume outputs/run1
 ```
 
 The image contains only the code and its dependencies. `configs/` and `benchmarks/` are mounted from the host
 (read-only), so edited configs need no rebuild; they must exist on the machine that runs the container (e.g. a
 repository checkout). A missing host folder is mounted as an empty folder, so the container sees no configs.
 Inside the container `git_commit` in `metadata.yaml` is `null`, because the image contains no `.git` folder.
+
+## Origin, license and citation
+
+The code started as a minimal, refactored subset of
+[automl/TransformersCanDoBayesianInference](https://github.com/automl/TransformersCanDoBayesianInference),
+which is licensed under the Apache License 2.0. This project is distributed under the same license; the full text
+is in `src/LICENSE`.
+
+| File | Origin |
+|---|---|
+| `transformer.py` | Copied from the original `transformer.py` and modified (positional encodings removed, Gaussian head). |
+| `train.py` | Refactored from the original `train.py` (configs, run folders, checkpoints, resume, TensorBoard). |
+| `utils.py` | Parts copied and simplified from the original `utils.py` (LR schedule, `SeqBN`, `get_batch_to_dataloader`). |
+| `prior.py` | New, but follows the `get_batch` interface of the original `priors/fast_gp.py`. |
+| `config.py`, `inference.py`, `gp_benchmark.py`, `evaluate_m4.py`, `download_m4.py` | New. |
+
+Apache-2.0 obligations when redistributing: keep the license text (`LICENSE`), keep the attribution notes
+(this section and the module docstrings of the derived files) and state that the derived files were modified.
+The original repository has no NOTICE file, so there is no NOTICE to carry over.
+
+The M4 data downloaded by `download_m4.py` are not part of this project; they come from
+[Mcompetitions/M4-methods](https://github.com/Mcompetitions/M4-methods) and keep that repository's terms.
+
+If you use this code, please cite the original paper:
+
+```bibtex
+@inproceedings{muller2022transformers,
+  title     = {Transformers Can Do Bayesian Inference},
+  author    = {M{\"u}ller, Samuel and Hollmann, Noah and Pineda Arango, Sebastian and Grabocka, Josif and Hutter, Frank},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2022},
+  url       = {https://arxiv.org/abs/2112.10510}
+}
+```

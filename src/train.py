@@ -1,6 +1,7 @@
 """Minimal PFN training on the GP prior (`src/prior.py`).
 
-Refactored copy of `train.py` with fixed choices:
+Refactored copy of `train.py` of github.com/automl/TransformersCanDoBayesianInference (Apache-2.0), with fixed
+choices:
     encoder:      nn.Linear(num_features, emsize)
     y_encoder:    nn.Linear(1, emsize)
     (no positional encoding: the model is invariant to the order of the context points)
@@ -12,12 +13,15 @@ Run from the repository root, e.g.:
     python -m src.train --config configs/linear_gp.yaml training.epochs=10 model.emsize=128 --output_dir outputs/run1
     python -m src.train --config configs/linear_gp.yaml --print_config   # show the resolved config and exit
 
-The run folder `--output_dir` (required) contains `config.yaml` (resolved config, reusable with `--config`),
+The run folder `--output_dir` (required) contains `config.yaml` (resolved config, reusable with `--config`;
+written at the start),
 `metadata.yaml` (git commit, library versions, final losses), `model.pt` (see `load_checkpoint`) and
 `tensorboard/` (view with `tensorboard --logdir outputs`; disable with `training.tensorboard=false`).
 With `training.checkpoint_every=n`, `checkpoints/model_epoch_XXXX.pt` is also written every n epochs (same format).
 With `training.gp_benchmark=FILE`, the exact-GP benchmark (`src/gp_benchmark.py`) is evaluated every
 `training.gp_benchmark_every` epochs and after the last one, and logged to TensorBoard.
+While training, `checkpoints/last.pt` holds the full training state after the last completed epoch; continue an
+interrupted run with `python -m src.train --resume outputs/run1` (deleted when the run finishes).
 """
 import argparse
 import datetime
@@ -67,6 +71,25 @@ def ensure_seed(config):
         config.training.seed = random.SystemRandom().randrange(2 ** 31)
 
 
+def get_rng_state():
+    """Random number generator states used in training: python `random` (single_eval_pos), torch CPU, CUDA, MPS."""
+    state = {'python': random.getstate(), 'torch': torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state['cuda'] = torch.cuda.get_rng_state_all()
+    if torch.backends.mps.is_available():
+        state['mps'] = torch.mps.get_rng_state()
+    return state
+
+
+def set_rng_state(state):
+    random.setstate(state['python'])
+    torch.set_rng_state(state['torch'])
+    if 'cuda' in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state['cuda'])
+    if 'mps' in state and torch.backends.mps.is_available():
+        torch.mps.set_rng_state(state['mps'])
+
+
 def train(
         config: TrainConfig | None = None,
         priordataloader_class=prior.DataLoader,
@@ -75,7 +98,9 @@ def train(
         load_weights_from_this_state_dict=None,
         verbose=True,
         checkpoint_fn=None,
-        epoch_fn=None
+        epoch_fn=None,
+        state_fn=None,
+        resume_state=None
 ):
     """Train a PFN with Gaussian NLL loss.
 
@@ -92,6 +117,11 @@ def train(
         `metrics`: `loss`, `positional_losses` (list, nan = position not sampled), `lr`, `epoch_time`,
         `data_time`, `step_time`, `forward_time` (the last three: of the last batch), and `gp_benchmark`
         (results of `src.gp_benchmark.evaluate`) in the epochs in which `config.training.gp_benchmark` is evaluated
+    :param state_fn: optional `state_fn(epoch, state)` called after every epoch with the full training state
+        (`epoch`, `model`, `optimizer`, `scheduler`, `rng`, `total_loss`, `total_positional_losses`); the CLI
+        saves it as `checkpoints/last.pt` (see `save_training_state`)
+    :param resume_state: such a state (with the same `config`) to continue training after its `epoch`; the
+        continuation is identical to an uninterrupted run up to non-deterministic GPU/MPS kernels
     :return: (mean loss of the last epoch, mean loss per single_eval_pos of the last epoch, model on CPU)
     """
     config = config or TrainConfig()
@@ -151,6 +181,17 @@ def train(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = scheduler(optimizer, o.warmup_epochs, epochs)
 
+    start_epoch, total_loss, total_positional_losses = 1, float('inf'), None
+    if resume_state is not None:
+        # After building the model and the prior (which consume random numbers), so the RNG state is the saved one.
+        model.load_state_dict(resume_state['model'])
+        optimizer.load_state_dict(resume_state['optimizer'])
+        scheduler.load_state_dict(resume_state['scheduler'])
+        set_rng_state(resume_state['rng'])
+        start_epoch = resume_state['epoch'] + 1
+        total_loss, total_positional_losses = resume_state['total_loss'], resume_state['total_positional_losses']
+        print(f'Resuming after epoch {resume_state["epoch"]}')
+
     def train_epoch():
         model.train()
         total_loss = 0.
@@ -193,8 +234,7 @@ def train(
         positional_losses = (total_positional_losses / total_positional_losses_recorded).tolist()
         return total_loss / steps_per_epoch, positional_losses, time_to_get_batch, forward_time, step_time
 
-    total_loss, total_positional_losses = float('inf'), None
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         epoch_start_time = time.time()
         total_loss, total_positional_losses, time_to_get_batch, forward_time, step_time = train_epoch()
         epoch_time = time.time() - epoch_start_time
@@ -228,6 +268,15 @@ def train(
         checkpoint_every = t.checkpoint_every or epochs
         if checkpoint_fn is not None and epoch % checkpoint_every == 0 and epoch < epochs:
             checkpoint_fn(epoch, model, total_loss, total_positional_losses)
+
+        if state_fn is not None:
+            state_fn(epoch, {'epoch': epoch,
+                             'model': {k: v.detach().cpu() for k, v in model.state_dict().items()},
+                             'optimizer': optimizer.state_dict(),
+                             'scheduler': scheduler.state_dict(),
+                             'rng': get_rng_state(),
+                             'total_loss': total_loss,
+                             'total_positional_losses': total_positional_losses})
 
     return total_loss, total_positional_losses, model.to('cpu')
 
@@ -274,26 +323,29 @@ class TensorBoardLogger:
     View with `tensorboard --logdir outputs` (all runs) or `--logdir outputs/run5/tensorboard` (one run).
     """
 
-    def __init__(self, log_dir, config, metadata=None):
+    def __init__(self, log_dir, config, metadata=None, resume_epoch=None):
+        """:param resume_epoch: last completed epoch of a resumed run: logged values of later epochs (from the
+        interrupted session) are discarded, and the config/HParams (already in `log_dir`) are not written again."""
         from torch.utils.tensorboard import SummaryWriter
         from torch.utils.tensorboard.summary import hparams
 
-        self.writer = SummaryWriter(log_dir=log_dir)
+        self.writer = SummaryWriter(log_dir=log_dir, purge_step=None if resume_epoch is None else resume_epoch + 1)
 
         def as_text(data):  # markdown code block (indented)
             return '\n'.join('    ' + line for line in yaml.safe_dump(data, sort_keys=False).splitlines())
 
-        self.writer.add_text('config', as_text(config_to_dict(config)))
-        if metadata:
-            self.writer.add_text('metadata', as_text(metadata))
         # Session start now and end in `close`, so running (or interrupted) runs appear in the HParams tab too;
         # the metric columns show the latest values of these scalars.
         metric_tags = {'loss/mean': None}
         if config.training.gp_benchmark is not None:
             metric_tags.update({'gp_benchmark/kl': None, 'gp_benchmark/nll_gap': None})
         exp, ssi, self._sei = hparams(flatten_config(config), metric_tags)
-        self.writer.file_writer.add_summary(exp)
-        self.writer.file_writer.add_summary(ssi)
+        if resume_epoch is None:
+            self.writer.add_text('config', as_text(config_to_dict(config)))
+            if metadata:
+                self.writer.add_text('metadata', as_text(metadata))
+            self.writer.file_writer.add_summary(exp)
+            self.writer.file_writer.add_summary(ssi)
         self.writer.flush()
 
     def log_epoch(self, epoch, metrics):
@@ -343,6 +395,23 @@ def save_intermediate_checkpoint(output_dir, config, metadata, epoch, model, tot
     print(f'Saved checkpoint to {path}')
 
 
+def training_state_path(output_dir):
+    return os.path.join(output_dir, 'checkpoints', 'last.pt')
+
+
+def save_training_state(output_dir, state, metadata):
+    """Write `state` (see `train(state_fn=...)`) and `metadata` to `checkpoints/last.pt`, atomically (temporary file
+    + rename), so an interruption while writing leaves the previous state intact."""
+    path = training_state_path(output_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({**state, 'metadata': metadata}, path + '.tmp')
+    os.replace(path + '.tmp', path)
+
+
+def load_training_state(output_dir):
+    return torch.load(training_state_path(output_dir), map_location='cpu', weights_only=True)
+
+
 def save_run(output_dir, config, model, total_loss, total_positional_losses, metadata):
     """Write `config.yaml`, `metadata.yaml` and `model.pt` to `output_dir`."""
     os.makedirs(output_dir, exist_ok=True)
@@ -378,46 +447,89 @@ def parse_args(argv=None):
                         help='YAML config file; can be given several times (merged in order).')
     parser.add_argument('--output_dir',
                         help='Run folder for config.yaml, metadata.yaml, model.pt, checkpoints/ and tensorboard/; '
-                             'must not contain a model.pt. Required unless --print_config is given.')
+                             'must not contain a model.pt or an interrupted run. Required unless --resume or '
+                             '--print_config is given.')
+    parser.add_argument('--resume', metavar='RUN_DIR',
+                        help='Continue the interrupted run in RUN_DIR (from checkpoints/last.pt, with its '
+                             'config.yaml); no --config, overrides or --output_dir.')
     parser.add_argument('--print_config', action='store_true', help='Print the resolved config and exit.')
     parser.add_argument('overrides', nargs='*', metavar='key.sub=value',
                         help='Override single values, e.g. model.emsize=256 prior.hyperparameters.noise=0.01')
     args = parser.parse_intermixed_args(argv)
-    if args.output_dir is None and not args.print_config:
-        parser.error('the following arguments are required: --output_dir')
+    if args.resume is not None:
+        if args.config or args.overrides or args.output_dir is not None:
+            parser.error('--resume cannot be combined with --config, overrides or --output_dir '
+                         '(the run continues with its own config.yaml)')
+        args.output_dir = args.resume
+    elif args.output_dir is None and not args.print_config:
+        parser.error('the following arguments are required: --output_dir (or --resume)')
     return args
 
 
-if __name__ == '__main__':
-    args = parse_args()
-    config = load_config(*args.config, overrides=args.overrides)
+def main(argv=None):
+    args = parse_args(argv)
+    output_dir = args.output_dir
+    resume_state = None
+    if args.resume is not None:
+        if not os.path.isfile(training_state_path(output_dir)):
+            finished = os.path.exists(os.path.join(output_dir, 'model.pt'))
+            raise FileNotFoundError(f'{training_state_path(output_dir)} not found: nothing to resume'
+                                    + (' (the run is finished: model.pt exists).' if finished else '.'))
+        config = load_config(os.path.join(output_dir, 'config.yaml'))
+    else:
+        config = load_config(*args.config, overrides=args.overrides)
 
     if args.print_config:
         print(yaml.safe_dump(config_to_dict(config), sort_keys=False), end='')
-        raise SystemExit
+        return
 
     # Fail before training rather than after it.
-    if os.path.exists(os.path.join(args.output_dir, 'model.pt')):
-        raise FileExistsError(f'{args.output_dir} already contains a model.pt; choose another --output_dir.')
+    if os.path.exists(os.path.join(output_dir, 'model.pt')):
+        raise FileExistsError(f'{output_dir} already contains a model.pt (finished run); choose another --output_dir.')
     if config.training.gp_benchmark is not None and not os.path.isfile(config.training.gp_benchmark):
         raise FileNotFoundError(f'training.gp_benchmark: no such file: {config.training.gp_benchmark}')
 
+    if args.resume is not None:
+        resume_state = load_training_state(output_dir)
+        metadata = resume_state.pop('metadata')
+        new_session = run_metadata()
+        metadata['resumed'] = metadata.get('resumed', []) + [
+            {'after_epoch': resume_state['epoch'], 'timestamp': new_session['timestamp'],
+             'git_commit': new_session['git_commit'], 'git_dirty': new_session['git_dirty']}]
+    else:
+        if os.path.exists(training_state_path(output_dir)):
+            raise FileExistsError(f'{output_dir} contains an interrupted run; continue it with --resume '
+                                  f'{output_dir} or choose another --output_dir.')
+        ensure_seed(config)  # the saved config.yaml records the seed (needed by --resume)
+        os.makedirs(output_dir, exist_ok=True)
+        save_config(config, os.path.join(output_dir, 'config.yaml'))
+        metadata = run_metadata()
+
     print('Config:\n' + yaml.safe_dump(config_to_dict(config), sort_keys=False))
-    metadata = run_metadata()
 
     def checkpoint_fn(epoch, model, total_loss, total_positional_losses):
-        save_intermediate_checkpoint(args.output_dir, config, metadata, epoch, model, total_loss,
-                                     total_positional_losses)
+        save_intermediate_checkpoint(output_dir, config, metadata, epoch, model, total_loss, total_positional_losses)
+
+    def state_fn(epoch, state):
+        save_training_state(output_dir, state, metadata)
 
     logger = None
     if config.training.tensorboard:
-        ensure_seed(config)  # so that the logged config contains the seed
-        logger = TensorBoardLogger(os.path.join(args.output_dir, 'tensorboard'), config, metadata)
+        logger = TensorBoardLogger(os.path.join(output_dir, 'tensorboard'), config, metadata,
+                                   resume_epoch=resume_state and resume_state['epoch'])
     try:
         total_loss, total_positional_losses, model = train(
-            config, checkpoint_fn=checkpoint_fn, epoch_fn=logger and logger.log_epoch)
+            config, checkpoint_fn=checkpoint_fn, epoch_fn=logger and logger.log_epoch, state_fn=state_fn,
+            resume_state=resume_state)
     finally:
         if logger is not None:
             logger.close()
 
-    save_run(args.output_dir, config, model, total_loss, total_positional_losses, metadata)
+    save_run(output_dir, config, model, total_loss, total_positional_losses, metadata)
+    os.remove(training_state_path(output_dir))  # the run is finished; model.pt is the final result
+    if not os.listdir(os.path.dirname(training_state_path(output_dir))):
+        os.rmdir(os.path.dirname(training_state_path(output_dir)))  # no intermediate checkpoints
+
+
+if __name__ == '__main__':
+    main()

@@ -1,6 +1,6 @@
 """Utilities needed by `src/prior.py`, `src/transformer.py` and `src/train.py`.
 
-Copied from:
+Copied (and partly simplified) from github.com/automl/TransformersCanDoBayesianInference (Apache-2.0):
   - `utils.py`: `get_default_device`, `default_device`, `SeqBN`, `get_cosine_schedule_with_warmup`,
     `get_openai_lr`, `get_weighted_single_eval_pos_sampler`, `get_uniform_single_eval_pos_sampler`
   - `priors/prior.py`: `PriorDataLoader` (now removed; its interface is described in `get_batch_to_dataloader`)
