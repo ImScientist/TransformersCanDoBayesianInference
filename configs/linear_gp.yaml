@@ -1,21 +1,56 @@
 # Linear-trend GP prior on an equidistant 1D grid.
-# Only values that differ from the defaults in `src/config.py` are listed; print the full resolved config with
+# Every available setting is listed with a short explanation. Values marked "(changed)" differ from the defaults
+# in `src/config.py` (the single source of defaults and constraints); all others are the defaults, so deleting a
+# line leaves the config unchanged. Print the resolved config with
 #   python -m src.train --config configs/linear_gp.yaml --print_config
-prior:
-  num_features: 1
-  equidistant_x: true
-  hyperparameters:
-    noise: 0.01
-    variance: 3.0
-    rbf_outputscale: 0.0  # no RBF part
-    bias: 0.5
+# Any value can be overridden on the command line, e.g. `training.epochs=5 prior.hyperparameters.noise=0.1`.
 
-training:
-  bptt: 12
-  epochs: 20
-  steps_per_epoch: 10
-  batch_size: 1000
+prior:                          # the GP prior the training datasets are sampled from (`src/prior.py`)
+  num_features: 1               # input dimension of x
+  equidistant_x: true           # (changed) x on an equidistant grid instead of uniform random; needs num_features: 1
+  device: null                  # device for sampling the prior; null = same rule as the model (CUDA, MPS, then CPU)
+  sampling_method: auto         # auto | basis | cholesky; auto = basis if num_features == 1 else cholesky
+  basis_tol: 1.0e-4             # accuracy of the 'basis' method, between 1e-6 and 0.1
+  forecast_prob: 0.0            # fraction of datasets with sorted x (context = smallest x: forecasting); 0..1
+  hyperparameters:
+    # Each value is a fixed number or a distribution sampled per dataset, e.g.
+    #   noise: {dist: log_uniform, low: 1.0e-4, high: 0.1}
+    #   bias: {dist: uniform, low: 0.0, high: 1.0, zero_prob: 0.5}   # exactly 0 with probability 0.5
+    # (`log_uniform` needs low > 0; `zero_prob` only for the scales that may be 0.)
+    noise: 0.01                 # (changed) observation noise variance; > 0
+    variance: 3.0               # (changed) variance of the linear (dot-product) part; >= 0
+    rbf_outputscale: 0.0        # (changed) RBF output scale; 0 = no RBF part
+    rbf_lengthscale: 0.1        # RBF lengthscale; must be > 0 if rbf_outputscale can be > 0
+    bias: 0.5                   # (changed) constant kernel offset (intercept variance); 0 = none
+    periodic_outputscale: 0.0   # Exp-Sine-Squared output scale; 0 = no periodic part
+    period: null                # period; required (> 0) if periodic_outputscale can be > 0
+    periodic_lengthscale: null  # smoothness within a period (small = more harmonics); required like period
+    periodic_decay: null        # lengthscale of an extra RBF factor; null = exactly periodic
+
+model:                          # the transformer (`src/transformer.py`)
+  emsize: 512                   # embedding size; must be divisible by nhead
+  nhid: null                    # hidden size of the feed-forward layers; null = 2 * emsize
+  nlayers: 6                    # number of transformer layers
+  nhead: 4                      # number of attention heads
+  dropout: 0.0                  # dropout probability, 0 <= dropout < 1
+  input_normalization: false    # batch norm (SeqBN) of the token embeddings before the transformer
+  min_var: 1.0e-6               # lower bound of the predicted variance
 
 optim:
-  lr: 0.001
-  warmup_epochs: 5
+  lr: 0.001                     # peak learning rate; null = heuristic `get_openai_lr(model)`
+  warmup_epochs: 5              # (changed) linear warm-up before the cosine decay
+  aggregate_k_gradients: 1      # gradient accumulation steps; must divide training.steps_per_epoch
+
+training:
+  epochs: 20                    # (changed)
+  steps_per_epoch: 10           # optimizer steps (batches) per epoch; a new dataset batch is sampled every step
+  batch_size: 1000              # datasets (sequences) per batch
+  bptt: 12                      # (changed) points per dataset (context + queries); >= 2
+  max_eval_pos: null            # context size is sampled from range(max_eval_pos); null = bptt; <= bptt
+  eval_pos_sampling: weighted   # weighted | uniform distribution of the context size
+  seed: null                    # null = random seed, chosen and recorded in the run folder
+  device: null                  # device for the model; null = CUDA, MPS, then CPU
+  checkpoint_every: null        # save a checkpoint every n epochs; null = only the final model
+  tensorboard: true             # write TensorBoard logs to <output_dir>/tensorboard
+  gp_benchmark: null            # exact-GP benchmark file, e.g. benchmarks/gp_benchmark_v1.npz; null = none
+  gp_benchmark_every: null      # evaluate it every n epochs (and after the last); null = only after the last
