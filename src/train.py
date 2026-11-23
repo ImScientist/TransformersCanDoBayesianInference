@@ -3,7 +3,7 @@
 Refactored copy of `train.py` with fixed choices:
     encoder:      nn.Linear(num_features, emsize)
     y_encoder:    nn.Linear(1, emsize)
-    pos_encoder:  NoPositionalEncoding
+    (no positional encoding: the model is invariant to the order of the context points)
     criterion:    `model.criterion` = nn.GaussianNLLLoss(reduction='none', full=True); the model returns
                   (mean, variance) for every query point (variance mapped to be positive inside the model)
 
@@ -12,8 +12,9 @@ Run from the repository root, e.g.:
     python -m src.train --config configs/linear_gp.yaml training.epochs=10 model.emsize=128 --output_dir outputs/run1
     python -m src.train --config configs/linear_gp.yaml --print_config   # show the resolved config and exit
 
-With `--output_dir`, the run folder contains `config.yaml` (resolved config, reusable with `--config`),
-`metadata.yaml` (git commit, library versions, final losses) and `model.pt` (see `load_checkpoint`).
+The run folder `--output_dir` (required) contains `config.yaml` (resolved config, reusable with `--config`),
+`metadata.yaml` (git commit, library versions, final losses), `model.pt` (see `load_checkpoint`) and
+`tensorboard/` (view with `tensorboard --logdir outputs`; disable with `training.tensorboard=false`).
 With `training.checkpoint_every=n`, `checkpoints/model_epoch_XXXX.pt` is also written every n epochs (same format).
 """
 import argparse
@@ -31,7 +32,6 @@ from torch import nn
 
 from src import prior
 from src.config import TrainConfig, config_from_dict, config_to_dict, load_config, save_config
-from src.positional_encodings import NoPositionalEncoding
 from src.transformer import GaussianTransformerModel
 from src.utils import (
     default_device,
@@ -54,10 +54,15 @@ def build_model(config: TrainConfig, decoder=None):
         nlayers=m.nlayers,
         dropout=m.dropout,
         y_encoder=nn.Linear(1, m.emsize),
-        pos_encoder=NoPositionalEncoding(m.emsize, config.training.bptt * 2),  # arguments don't matter
         decoder=decoder,
         input_normalization=m.input_normalization,
         min_var=m.min_var)
+
+
+def ensure_seed(config):
+    """Draw a random `config.training.seed` (in place) if it is None."""
+    if config.training.seed is None:
+        config.training.seed = random.SystemRandom().randrange(2 ** 31)
 
 
 def train(
@@ -67,7 +72,8 @@ def train(
         scheduler=get_cosine_schedule_with_warmup,
         load_weights_from_this_state_dict=None,
         verbose=True,
-        checkpoint_fn=None
+        checkpoint_fn=None,
+        epoch_fn=None
 ):
     """Train a PFN with Gaussian NLL loss.
 
@@ -80,14 +86,16 @@ def train(
     :param scheduler: factory `scheduler(optimizer, warmup_epochs, epochs)`, stepped once per epoch
     :param checkpoint_fn: optional `checkpoint_fn(epoch, model, total_loss, total_positional_losses)`, called
         after every `config.training.checkpoint_every` epochs except the last one (the returned model is final)
+    :param epoch_fn: optional `epoch_fn(epoch, metrics)` called after every epoch, e.g. `TensorBoardLogger.log_epoch`;
+        `metrics`: `loss`, `positional_losses` (list, nan = position not sampled), `lr`, `epoch_time`,
+        `data_time`, `step_time`, `forward_time` (the last three: of the last batch)
     :return: (mean loss of the last epoch, mean loss per single_eval_pos of the last epoch, model on CPU)
     """
     config = config or TrainConfig()
     config_from_dict(config_to_dict(config))  # re-check all constraints (incl. cross-section) after in-place edits
     p, o, t = config.prior, config.optim, config.training
 
-    if t.seed is None:
-        t.seed = random.SystemRandom().randrange(2 ** 31)
+    ensure_seed(config)
     # The single_eval_pos samplers use python's `random`, everything else uses torch.
     random.seed(t.seed)
     torch.manual_seed(t.seed)
@@ -178,15 +186,22 @@ def train(
     for epoch in range(1, epochs + 1):
         epoch_start_time = time.time()
         total_loss, total_positional_losses, time_to_get_batch, forward_time, step_time = train_epoch()
+        epoch_time = time.time() - epoch_start_time
+        lr_epoch = scheduler.get_last_lr()[0]
 
         if verbose:
             print('-' * 89)
             print(
-                f'| end of epoch {epoch:3d} | time: {(time.time() - epoch_start_time):5.2f}s | mean loss {total_loss:5.2f} | '
-                f"pos losses {','.join([f'{l:5.2f}' for l in total_positional_losses])}, lr {scheduler.get_last_lr()[0]}"
+                f'| end of epoch {epoch:3d} | time: {epoch_time:5.2f}s | mean loss {total_loss:5.2f} | '
+                f"pos losses {','.join([f'{l:5.2f}' for l in total_positional_losses])}, lr {lr_epoch}"
                 f' data time {time_to_get_batch:5.2f} step time {step_time:5.2f}'
                 f' forward time {forward_time:5.2f}')
             print('-' * 89)
+
+        if epoch_fn is not None:
+            epoch_fn(epoch, {'loss': total_loss, 'positional_losses': total_positional_losses, 'lr': lr_epoch,
+                             'epoch_time': epoch_time, 'data_time': time_to_get_batch, 'step_time': step_time,
+                             'forward_time': forward_time})
 
         scheduler.step()
 
@@ -218,6 +233,60 @@ def run_metadata():
         'gpytorch': str(gpytorch.__version__),
         'cuda': torch.version.cuda,
     }
+
+
+def flatten_config(config):
+    """Flat `{'prior.hyperparameters.noise.low': 1e-4, ...}` with TensorBoard-compatible values (None -> 'null')."""
+
+    def walk(value, prefix):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                yield from walk(v, f'{prefix}.{k}' if prefix else k)
+        else:
+            yield prefix, 'null' if value is None else value
+
+    return dict(walk(config_to_dict(config), ''))
+
+
+class TensorBoardLogger:
+    """Write the config (Text and HParams tabs) and the per-epoch losses (Scalars tab) of a run to `log_dir`.
+
+    View with `tensorboard --logdir outputs` (all runs) or `--logdir outputs/run5/tensorboard` (one run).
+    """
+
+    def __init__(self, log_dir, config, metadata=None):
+        from torch.utils.tensorboard import SummaryWriter
+        from torch.utils.tensorboard.summary import hparams
+
+        self.writer = SummaryWriter(log_dir=log_dir)
+
+        def as_text(data):  # markdown code block (indented)
+            return '\n'.join('    ' + line for line in yaml.safe_dump(data, sort_keys=False).splitlines())
+
+        self.writer.add_text('config', as_text(config_to_dict(config)))
+        if metadata:
+            self.writer.add_text('metadata', as_text(metadata))
+        # Session start now and end in `close`, so running (or interrupted) runs appear in the HParams tab too;
+        # the metric column shows the latest value of the `loss/mean` scalar.
+        exp, ssi, self._sei = hparams(flatten_config(config), {'loss/mean': None})
+        self.writer.file_writer.add_summary(exp)
+        self.writer.file_writer.add_summary(ssi)
+        self.writer.flush()
+
+    def log_epoch(self, epoch, metrics):
+        w = self.writer
+        w.add_scalar('loss/mean', metrics['loss'], epoch)
+        for pos, loss in enumerate(metrics['positional_losses']):
+            if loss == loss:  # skip nan (context size not sampled in this epoch)
+                w.add_scalar(f'loss_by_context_size/{pos:04d}', loss, epoch)
+        w.add_scalar('optim/lr', metrics['lr'], epoch)
+        for name in ('epoch_time', 'data_time', 'step_time', 'forward_time'):
+            w.add_scalar(f'time/{name}', metrics[name], epoch)
+        w.flush()
+
+    def close(self):
+        self.writer.file_writer.add_summary(self._sei)
+        self.writer.close()
 
 
 def save_checkpoint(path, config, model, metadata):
@@ -269,12 +338,16 @@ def parse_args(argv=None):
                     '<- dotted overrides.')
     parser.add_argument('--config', action='append', default=[],
                         help='YAML config file; can be given several times (merged in order).')
-    parser.add_argument('--output_dir', default=None,
-                        help='Run folder for config.yaml, metadata.yaml and model.pt; must not contain a model.pt.')
+    parser.add_argument('--output_dir',
+                        help='Run folder for config.yaml, metadata.yaml, model.pt, checkpoints/ and tensorboard/; '
+                             'must not contain a model.pt. Required unless --print_config is given.')
     parser.add_argument('--print_config', action='store_true', help='Print the resolved config and exit.')
     parser.add_argument('overrides', nargs='*', metavar='key.sub=value',
                         help='Override single values, e.g. model.emsize=256 prior.hyperparameters.noise=0.01')
-    return parser.parse_intermixed_args(argv)
+    args = parser.parse_intermixed_args(argv)
+    if args.output_dir is None and not args.print_config:
+        parser.error('the following arguments are required: --output_dir')
+    return args
 
 
 if __name__ == '__main__':
@@ -286,19 +359,25 @@ if __name__ == '__main__':
         raise SystemExit
 
     # Fail before training rather than after it.
-    if args.output_dir is not None and os.path.exists(os.path.join(args.output_dir, 'model.pt')):
+    if os.path.exists(os.path.join(args.output_dir, 'model.pt')):
         raise FileExistsError(f'{args.output_dir} already contains a model.pt; choose another --output_dir.')
 
     print('Config:\n' + yaml.safe_dump(config_to_dict(config), sort_keys=False))
     metadata = run_metadata()
-    checkpoint_fn = None
-    if args.output_dir is not None:
-        def checkpoint_fn(epoch, model, total_loss, total_positional_losses):
-            save_intermediate_checkpoint(args.output_dir, config, metadata, epoch, model, total_loss,
-                                         total_positional_losses)
-    elif config.training.checkpoint_every is not None:
-        print('Warning: training.checkpoint_every is ignored without --output_dir.')
-    total_loss, total_positional_losses, model = train(config, checkpoint_fn=checkpoint_fn)
 
-    if args.output_dir is not None:
-        save_run(args.output_dir, config, model, total_loss, total_positional_losses, metadata)
+    def checkpoint_fn(epoch, model, total_loss, total_positional_losses):
+        save_intermediate_checkpoint(args.output_dir, config, metadata, epoch, model, total_loss,
+                                     total_positional_losses)
+
+    logger = None
+    if config.training.tensorboard:
+        ensure_seed(config)  # so that the logged config contains the seed
+        logger = TensorBoardLogger(os.path.join(args.output_dir, 'tensorboard'), config, metadata)
+    try:
+        total_loss, total_positional_losses, model = train(
+            config, checkpoint_fn=checkpoint_fn, epoch_fn=logger and logger.log_epoch)
+    finally:
+        if logger is not None:
+            logger.close()
+
+    save_run(args.output_dir, config, model, total_loss, total_positional_losses, metadata)

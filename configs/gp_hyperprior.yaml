@@ -42,6 +42,8 @@ training:
   eval_pos_sampling: weighted  # weighted | uniform
   seed: null  # null = random seed (chosen and recorded by train)
   device: null  # device for the model; null = default device (CUDA, MPS, then CPU)
+  checkpoint_every: null  # save checkpoints/model_epoch_XXXX.pt every n epochs; null = epochs (only model.pt)
+  tensorboard: true  # write TensorBoard logs to <output_dir>/tensorboard
 
 optim:
   lr: 0.0003  # null = get_openai_lr(model)

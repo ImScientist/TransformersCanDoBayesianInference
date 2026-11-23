@@ -30,7 +30,6 @@ MCMC, no hyperparameter fitting, no matrix inversion.
 | `inference.py` | Batched inference for datasets of different sizes (padding + per-dataset mask: `pad_datasets`, `predict`) and a demo on synthetic forecasting data (`python -m src.inference`). |
 | `evaluate_m4.py` | Evaluation on the M4 competition data in `datasets/m4/` (not in git; download from github.com/Mcompetitions/M4-methods, folder `Dataset/`): sMAPE, MASE, OWA, MSIS against naive/drift baselines (`python -m src.evaluate_m4 --checkpoint DIR --frequency Yearly`). |
 | `utils.py` | Device selection, learning-rate schedule, `single_eval_pos` samplers, `SeqBN`, and `get_batch_to_dataloader` (turns a `get_batch` function into a data loader). |
-| `positional_encodings.py` | `NoPositionalEncoding`: the identity. The PFN must not depend on the order of the context points, so no positional information is added. |
 
 ## Setup
 
@@ -56,7 +55,8 @@ python -m src.train --config configs/gp_hyperprior.yaml training.epochs=10 --out
 
 # Small, fast smoke test on the CPU
 python -m src.train --config configs/linear_gp.yaml training.epochs=2 training.steps_per_epoch=2 \
-    training.batch_size=8 model.emsize=64 model.nlayers=1 prior.device=cpu training.device=cpu
+    training.batch_size=8 model.emsize=64 model.nlayers=1 prior.device=cpu training.device=cpu \
+    --output_dir outputs/smoke_test
 ```
 
 Command-line arguments:
@@ -64,8 +64,8 @@ Command-line arguments:
 - `--config FILE`: a YAML file. It can be given several times; files are merged in order.
 - `key.sub=value`: overrides a single value (parsed as YAML), e.g. `model.emsize=256`,
   `optim.lr=null`, or `prior.hyperparameters.noise={dist: uniform, low: 0.01, high: 0.1}`.
-- `--output_dir DIR`: the run folder. It must not already contain a `model.pt`; this is checked before
-  training starts.
+- `--output_dir DIR` (required unless `--print_config` is given): the run folder. It must not already contain
+  a `model.pt`; this is checked before training starts.
 - `--print_config`: print the resolved config and exit.
 
 The device is chosen automatically (CUDA, then Apple MPS, then CPU) unless `training.device` or
@@ -125,7 +125,8 @@ are not checked on assignment. They are checked by `load_config`, `config_from_d
 | | `eval_pos_sampling` | weighted | `weighted`: position `i` has weight `1 / (max_eval_pos - i)`, so every query point is equally likely to be seen with any context size. `uniform`: all positions equally likely. |
 | | `seed` | null | null = a random seed is drawn and written into the saved config. |
 | | `device` | null | Device for the model (null = automatic). |
-| | `checkpoint_every` | null | Save `checkpoints/model_epoch_XXXX.pt` every n epochs (needs `--output_dir`). null = `epochs`, i.e. only the final `model.pt`. |
+| | `checkpoint_every` | null | Save `checkpoints/model_epoch_XXXX.pt` in the run folder every n epochs. null = `epochs`, i.e. only the final `model.pt`. |
+| | `tensorboard` | true | Write TensorBoard logs (losses, learning rate, config) to `<output_dir>/tensorboard/`. |
 
 ### GP hyperparameters (`prior.hyperparameters`)
 
@@ -152,9 +153,6 @@ and `y = f(x) + eps` with `eps ~ N(0, noise)`. The GP has zero mean.
 | `period` | null | > 0 if `periodic_outputscale` can be > 0. |
 | `periodic_lengthscale` | null | Smoothness within one period (small = more harmonics); > 0 if the periodic part is on. Note: gpytorch's `PeriodicKernel` does not square its lengthscale, so its lengthscale equals `periodic_lengthscale²`. |
 | `periodic_decay` | null | Lengthscale of the optional RBF factor that makes the periodic part *locally* periodic; null = exactly periodic. |
-
-The names `outputscale` and `lengthscale` (used before the rename to `rbf_*`) are still accepted with a
-`DeprecationWarning`, so older configs and checkpoints keep working.
 
 **Hyperpriors.** Every hyperparameter is either a fixed number or a distribution that is sampled
 **independently for every dataset** in a batch, so the PFN learns to infer the hyperparameters from the
@@ -230,8 +228,8 @@ with the shapes above can be wrapped with `src.utils.get_batch_to_dataloader` an
   A context token is `enc(x_i) + enc(y_i)`; a query token is `enc(x_j)` only.
 - A standard `nn.TransformerEncoder` (GELU) runs over all tokens with a special attention mask: every token
   attends to all context tokens and to itself, and query tokens do **not** attend to each other. Each
-  prediction therefore depends only on the context and its own `x`, and the context order does not
-  matter.
+  prediction therefore depends only on the context and its own `x`. There is no positional encoding, so the
+  context order does not matter.
 - An MLP decoder maps each query token to two numbers. `GaussianTransformerModel` turns them into
   `mean` and `var = softplus(raw) + min_var`. Its loss is `model.criterion = nn.GaussianNLLLoss(full=True)`.
 - `forward((x, y), single_eval_pos)` returns `(mean, var)`, each of shape
@@ -249,14 +247,18 @@ and the warm-up + cosine learning-rate schedule. For every batch, a new `single_
 context points) is drawn, so the model learns to predict from any context size between 0 and `bptt - 1`.
 After each epoch it prints the mean loss and the loss per `single_eval_pos` (`nan` = position not sampled
 in that epoch). It returns `(mean loss of last epoch, losses per position, model on CPU)`.
+Optionally, `train(config, checkpoint_fn=f)` calls `f(epoch, model, loss, pos_losses)` after every
+`training.checkpoint_every` epochs (not after the last one); the CLI uses this to write intermediate checkpoints.
+`train(config, epoch_fn=g)` calls `g(epoch, metrics)` after every epoch (used for TensorBoard, see below).
 
 ```python
 from src.config import load_config
-from src.train import train, save_run, run_metadata
+from src.train import train, save_run, run_metadata, save_intermediate_checkpoint
 
-cfg = load_config('configs/gp_hyperprior.yaml', overrides=['training.epochs=5'])
+cfg = load_config('configs/gp_hyperprior.yaml', overrides=['training.epochs=5', 'training.checkpoint_every=2'])
 metadata = run_metadata()
-loss, pos_losses, model = train(cfg)
+loss, pos_losses, model = train(cfg, checkpoint_fn=lambda *a: save_intermediate_checkpoint(
+    'outputs/notebook_run', cfg, metadata, *a))  # optional
 save_run('outputs/notebook_run', cfg, model, loss, pos_losses, metadata)
 ```
 
@@ -266,12 +268,33 @@ save_run('outputs/notebook_run', cfg, model, loss, pos_losses, metadata)
 
 - `config.yaml`: the fully resolved config, including the seed. Reuse it with `--config DIR/config.yaml`
   to reproduce the run.
-- `metadata.yaml`: timestamp, git commit and dirty flag, Python/torch/gpytorch/CUDA versions, final losses.
+- `metadata.yaml`: timestamp, git commit and dirty flag, Python/torch/gpytorch/CUDA versions, the last
+  `epoch` and the final losses.
 - `model.pt`: `{'state_dict', 'config', 'metadata'}`.
 - `checkpoints/model_epoch_XXXX.pt` (only with `training.checkpoint_every=n`): intermediate checkpoints
   after every n epochs, excluding the last epoch, which is saved as `model.pt`. They use the same format, and
   their metadata records the `epoch` and the loss of that epoch. Load one with
   `load_checkpoint('DIR/checkpoints/model_epoch_0010.pt')`.
+- `tensorboard/` (unless `training.tensorboard=false`): TensorBoard event file, see below.
+
+### Monitoring with TensorBoard
+
+The command line (`TensorBoardLogger` in `train.py`) writes after every epoch, so a running training can be
+watched live:
+
+- **Scalars**: `loss/mean` (mean loss of the epoch), `loss_by_context_size/XXXX` (loss per number of context
+  points; context sizes not sampled in an epoch are skipped), `optim/lr`, and `time/*` (epoch, data, step and
+  forward time).
+- **Text**: the resolved config (with the seed) and the run metadata as YAML.
+- **HParams**: every config value as a flat key (e.g. `prior.hyperparameters.variance.high`), with the latest
+  `loss/mean` as metric. Use it to compare runs by their settings; running or interrupted runs appear too.
+
+```bash
+tensorboard --logdir outputs                    # all runs; open http://localhost:6006
+tensorboard --logdir outputs/run5/tensorboard   # a single run
+```
+
+From Python, pass `epoch_fn=logger.log_epoch` to `train` and call `logger.close()` at the end.
 
 ### Using a trained model
 

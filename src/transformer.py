@@ -3,7 +3,8 @@
 Copied from `transformer.py`, without the legacy `fuse_x_y` option: the input is always an
 `(x, y)` tuple and `single_eval_pos` is always required. Removing that option also removed
 the code paths for `single_eval_pos=None` (causal mask, interleaved x/y tokens). They could
-not be reached anyway.
+not be reached anyway. There is no positional encoding: the model must not depend on the order of the
+context points (all tokens are treated as a set; the attention mask alone separates context and queries).
 """
 import torch
 import torch.nn as nn
@@ -31,7 +32,7 @@ class BaseTransformerModel(nn.Module):
             self,
             encoder, ninp, nhead, nhid, nlayers, n_out,
             dropout=0.0,
-            y_encoder=None, pos_encoder=None, decoder=None,
+            y_encoder=None, decoder=None,
             input_normalization=False
     ):
         super().__init__()
@@ -42,7 +43,6 @@ class BaseTransformerModel(nn.Module):
         self.n_out = n_out
         self.encoder = encoder
         self.y_encoder = y_encoder
-        self.pos_encoder = pos_encoder
         self.decoder = (
             decoder(ninp, nhid, n_out) if decoder is not None
             else nn.Sequential(nn.Linear(ninp, nhid),
@@ -129,9 +129,6 @@ class BaseTransformerModel(nn.Module):
 
         if self.input_ln is not None:
             src = self.input_ln(src)
-
-        if self.pos_encoder is not None:
-            src = self.pos_encoder(src)
 
         output = self.transformer_encoder(src, src_mask)
         output = self.decoder(output[single_eval_pos:])

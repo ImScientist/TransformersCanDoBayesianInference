@@ -6,8 +6,8 @@
 #
 # Build (on an Apple Silicon Mac, cross-build for the Linux/x86_64 GPU machine):
 #   docker buildx build --platform linux/amd64 -t pfn-train .
-# Run on the GPU machine (the run folder with config.yaml, metadata.yaml and model.pt is written to the
-# mounted ./outputs directory; configs/ is part of the image):
+# Run on the GPU machine (the run folder with config.yaml, metadata.yaml, model.pt and tensorboard/ is written
+# to the mounted ./outputs directory; configs/ is part of the image):
 #   docker run --rm --gpus all -v "$PWD/outputs:/app/outputs" pfn-train \
 #       --config configs/linear_gp.yaml training.epochs=50 --output_dir outputs/run1
 # New configs can be used without rebuilding by mounting them, e.g.

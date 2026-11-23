@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=2.5.3",
     "pydantic>=2.14.3",
     "omegaconf>=2.4.0",
+    "tensorboard>=2.21.0",
 ]
 
 [project.optional-dependencies]

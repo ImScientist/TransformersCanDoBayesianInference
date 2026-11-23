@@ -3,7 +3,7 @@
 Copied from:
   - `utils.py`: `get_default_device`, `default_device`, `SeqBN`, `get_cosine_schedule_with_warmup`,
     `get_openai_lr`, `get_weighted_single_eval_pos_sampler`, `get_uniform_single_eval_pos_sampler`
-  - `priors/prior.py`: `PriorDataLoader`
+  - `priors/prior.py`: `PriorDataLoader` (now removed; its interface is described in `get_batch_to_dataloader`)
   - `priors/utils.py`: `get_batch_to_dataloader`
 """
 import math
@@ -12,7 +12,6 @@ import random
 import torch
 from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
 
 
 # copied from huggingface
@@ -87,41 +86,29 @@ def get_default_device():
 default_device = get_default_device()
 
 
-class PriorDataLoader(DataLoader):
-    """Interface for prior data loaders consumed by `train.train`.
-
-    Subclasses do not call `DataLoader.__init__`; they only implement `__len__` and `__iter__`
-    (yielding `(data, targets)` batches sampled on the fly). Required interface:
-      - `__init__(num_steps, num_features, **get_batch_kwargs)`
-      - instance attribute: `num_features: int`
-      - batches are `((x, y), target_y)` with x: (seq_len, batch_size, num_features),
-        y and target_y: (seq_len, batch_size), i.e. a single scalar output per point
-      - optional: `validate(model)` called periodically during training
-    See `get_batch_to_dataloader` for the standard implementation.
-    """
-
-
 def get_batch_to_dataloader(get_batch_method_):
-    """Wrap a prior's `get_batch` function into a DataLoader-like class.
+    """Wrap a prior's `get_batch` function into a data loader class, as expected by `train.train`
+    (argument `priordataloader_class`).
 
-    Every iteration over an instance calls `get_batch_method_(num_features=..., **get_batch_kwargs)`
-    `num_steps` times, producing a fresh synthetic batch each time (nothing is cached).
+    Interface of the returned class (any class with this interface can be passed to `train.train`):
+      - `__init__(num_steps, **get_batch_kwargs)`; `train.train` passes `batch_size`, `seq_len` and the
+        prior settings (`num_features`, `equidistant_x`, ...) as keyword arguments
+      - `__len__()`: `num_steps`
+      - `__iter__()`: yields `num_steps` batches `((x, y), target_y)` with x: (seq_len, batch_size,
+        num_features), y and target_y: (seq_len, batch_size), i.e. a single scalar output per point
 
-    Each step yields `((x, y), target_y)`; only priors with a single scalar output per point are supported.
-    `num_features` is a required constructor argument: it is stored on the instance (read by `train.py`)
-    and forwarded to `get_batch`.
+    Every iteration over an instance calls `get_batch_method_(**get_batch_kwargs)` `num_steps` times,
+    producing a fresh synthetic batch each time (nothing is cached). It is not a `torch.utils.data.DataLoader`:
+    there is no dataset or sampler.
 
     :param get_batch_method_: function `(batch_size, seq_len, num_features, ...) -> (x, y, target_y)` with
         x: (seq_len, batch_size, num_features), y and target_y: (seq_len, batch_size)
     """
 
-    class DL(PriorDataLoader):
-        def __init__(self, num_steps, num_features, **get_batch_kwargs):
-            # torch's DataLoader.__init__ is intentionally not called: there is no dataset/sampler,
-            # batches are generated on the fly in `__iter__`. Only `__len__`/`__iter__` are supported.
+    class DL:
+        def __init__(self, num_steps, **get_batch_kwargs):
             self.num_steps = num_steps
-            self.num_features = num_features
-            self.get_batch_kwargs = {'num_features': num_features, **get_batch_kwargs}
+            self.get_batch_kwargs = get_batch_kwargs
 
         @staticmethod
         def gbm(*args, **kwargs):

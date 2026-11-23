@@ -14,7 +14,6 @@ Usage in a notebook:
 Constraints between sections (e.g. `training.steps_per_epoch % optim.aggregate_k_gradients`) are only checked
 when the whole config is validated: by `load_config`, `config_from_dict` and at the start of `src.train.train`.
 """
-import warnings
 from typing import Annotated, Literal, Self
 
 import yaml
@@ -79,9 +78,6 @@ def _bounds(value):
     return value.low, value.high
 
 
-_RENAMED_HYPERPARAMETERS = {'outputscale': 'rbf_outputscale', 'lengthscale': 'rbf_lengthscale'}
-
-
 class GPHyperparameters(_Config):
     """Hyperparameters of the GP prior (see `src.prior.get_batch`). Each is a fixed number or a `Distribution`."""
     noise: Hyperparameter = .1  # observation noise variance; must be > 0
@@ -93,22 +89,6 @@ class GPHyperparameters(_Config):
     period: Hyperparameter | None = None  # period; required if periodic_outputscale can be > 0
     periodic_lengthscale: Hyperparameter | None = None  # smoothness within a period; small = more harmonics
     periodic_decay: Hyperparameter | None = None  # lengthscale of the RBF factor; None = exactly periodic
-
-    @model_validator(mode='before')
-    @classmethod
-    def _rename_deprecated(cls, data):
-        """Accept the old names (configs/checkpoints saved before the rename), with a `DeprecationWarning`."""
-        if not isinstance(data, dict) or not any(old in data for old in _RENAMED_HYPERPARAMETERS):
-            return data
-        data = dict(data)
-        for old, new in _RENAMED_HYPERPARAMETERS.items():
-            if old in data:
-                if new in data:
-                    raise ValueError(f'got both {old!r} (deprecated) and {new!r}; use only {new!r}')
-                warnings.warn(f'GP hyperparameter {old!r} is deprecated, use {new!r}', DeprecationWarning,
-                              stacklevel=2)
-                data[new] = data.pop(old)
-        return data
 
     @model_validator(mode='after')
     def _check(self) -> Self:
@@ -190,8 +170,9 @@ class TrainingConfig(_Config):
     eval_pos_sampling: Literal['weighted', 'uniform'] = 'weighted'
     seed: int | None = None  # None = random seed, chosen and recorded by `train`
     device: str | None = None  # device for the model; None = `default_device` (CUDA, MPS, then CPU)
-    # Save an intermediate checkpoint every n epochs (needs --output_dir); None = epochs, i.e. only the final model
+    # Save an intermediate checkpoint every n epochs; None = epochs, i.e. only the final model
     checkpoint_every: PositiveInt | None = None
+    tensorboard: bool = True  # write TensorBoard logs to <output_dir>/tensorboard
 
     @model_validator(mode='after')
     def _check(self) -> Self:
