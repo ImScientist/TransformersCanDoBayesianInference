@@ -35,7 +35,7 @@ legacy = [
 ]
 
 [dependency-groups]
-# Notebook / plotting tools; installed by `uv sync` by default, excluded with `--no-dev` (Docker image).
+# Notebook / plotting tools; installed by `uv sync` by default (also in the Docker image), excluded with `--no-dev`.
 dev = [
     "jupyter>=1.1.1",
     "seaborn>=0.13.2",
