@@ -30,6 +30,7 @@ MCMC, no hyperparameter fitting, no matrix inversion.
 | `inference.py` | Batched inference for datasets of different sizes (padding + per-dataset mask: `pad_datasets`, `predict`) and a demo on synthetic forecasting data (`python -m src.inference`). |
 | `evaluate_m4.py` | Evaluation on the M4 competition data in `datasets/m4/` (not in git; download from github.com/Mcompetitions/M4-methods, folder `Dataset/`): sMAPE, MASE, OWA, MSIS against naive/drift baselines (`python -m src.evaluate_m4 --checkpoint DIR --frequency Yearly`). |
 | `utils.py` | Device selection, learning-rate schedule, `single_eval_pos` samplers, `SeqBN`, and `get_batch_to_dataloader` (turns a `get_batch` function into a data loader). |
+| `gp_benchmark.py` | Comparison with the exact GP posterior on the stored benchmark `benchmarks/gp_benchmark_v1.npz` (fixed hyperparameter subsets): KL, NLL gap, error of mean and variance (`python -m src.gp_benchmark evaluate --checkpoint DIR`). |
 
 ## Setup
 
@@ -127,6 +128,8 @@ are not checked on assignment. They are checked by `load_config`, `config_from_d
 | | `device` | null | Device for the model (null = automatic). |
 | | `checkpoint_every` | null | Save `checkpoints/model_epoch_XXXX.pt` in the run folder every n epochs. null = `epochs`, i.e. only the final `model.pt`. |
 | | `tensorboard` | true | Write TensorBoard logs (losses, learning rate, config) to `<output_dir>/tensorboard/`. |
+| | `gp_benchmark` | null | Path of an exact-GP benchmark file (e.g. `benchmarks/gp_benchmark_v1.npz`) evaluated during training; the results are printed and logged to TensorBoard. null = no evaluation. |
+| | `gp_benchmark_every` | null | Evaluate `gp_benchmark` every n epochs and after the last epoch. null = `epochs`, i.e. only after the last epoch. |
 
 ### GP hyperparameters (`prior.hyperparameters`)
 
@@ -285,9 +288,13 @@ watched live:
 - **Scalars**: `loss/mean` (mean loss of the epoch), `loss_by_context_size/XXXX` (loss per number of context
   points; context sizes not sampled in an epoch are skipped), `optim/lr`, and `time/*` (epoch, data, step and
   forward time).
+- **Scalars, with `training.gp_benchmark`** (in the evaluated epochs): `gp_benchmark/<metric>` (all metrics of
+  the exact-GP comparison, averaged over subsets and context sizes), `gp_benchmark_kl/<subset>/<task>` and
+  `gp_benchmark_nll_gap/<subset>/<task>` (per subset), and `gp_benchmark_kl_by_context_size/XXXX` (averaged over
+  subsets).
 - **Text**: the resolved config (with the seed) and the run metadata as YAML.
 - **HParams**: every config value as a flat key (e.g. `prior.hyperparameters.variance.high`), with the latest
-  `loss/mean` as metric. Use it to compare runs by their settings; running or interrupted runs appear too.
+  `loss/mean` as metric (and `gp_benchmark/kl`, `gp_benchmark/nll_gap` with `training.gp_benchmark`). Use it to compare runs by their settings; running or interrupted runs appear too.
 
 ```bash
 tensorboard --logdir outputs                    # all runs; open http://localhost:6006
@@ -335,15 +342,49 @@ demo: it samples series of different lengths from the run's prior, forecasts the
 that the padded batch matches predicting one series at a time (about 1e-6). It also shows how much worse
 the predictions are without the mask, because padded `(0, 0)` tokens then act as observations.
 
+### Comparison with the exact GP (`gp_benchmark.py`)
+
+A PFN should approximate the GP posterior predictive. `benchmarks/gp_benchmark_v1.npz` (about 2 MB, kept in git)
+holds 16 subsets: 8 fixed hyperparameter settings (`SUBSETS`: short/long RBF lengthscale, low/high noise,
+linear trend, trend + RBF, periodic, trend + periodic), each with an `interpolation` task (x uniform, random
+order) and a `forecast` task (x sorted, the context consists of the smallest x). Every subset has 256 sequences
+of 64 points, sampled exactly (Cholesky, float64, CPU, seed 0).
+
+```bash
+python -m src.gp_benchmark evaluate --checkpoint outputs/my_run --output outputs/my_run/gp_benchmark.yaml
+python -m src.gp_benchmark create   # only to rebuild the file (bump VERSION when SUBSETS change)
+```
+
+For every context size n (0, 1, 2, 4, 8, 16, 32, 48) the first n points are the context and the rest the
+queries. The exact posterior predictive is computed in float64 and compared with the PFN per query point:
+`kl` = KL(exact GP || PFN) (main metric), `nll_pfn`, `nll_gp`, `nll_gap = nll_pfn - nll_gp`, `mean_z` (RMS
+error of the mean in posterior standard deviations) and `log_var_ratio` (> 0: PFN too uncertain). The script
+prints the metrics averaged over context sizes (plus an `all subsets` row) and the KL per context size.
+
+The data are stored instead of regenerated from a seed, because random numbers differ between devices and
+torch versions, and later changes to `prior.py` must not change the benchmark. The exact GP knows each
+subset's true hyperparameters, so it is a best case: a PFN trained on a hyperprior averages over hyperparameters
+and is wider, especially for small contexts. `kl` and `nll_gap` are therefore > 0 even for a perfect PFN and are
+meant for comparing models (they go to 0 only for a model trained on the subset's fixed hyperparameters). All
+`SUBSETS` lie inside the ranges of `configs/gp_hyperprior.yaml`.
+
+During training, `training.gp_benchmark=benchmarks/gp_benchmark_v1.npz` evaluates the benchmark every
+`training.gp_benchmark_every` epochs and after the last epoch. The results are printed and logged to TensorBoard
+(see "Monitoring with TensorBoard"). `configs/gp_hyperprior.yaml` enables this every 5 epochs; one evaluation
+takes a few seconds (about 3 s for a small model on MPS). In Docker, mount `benchmarks/`.
+
 ## Docker
 
 The `Dockerfile` in the repository root runs `python -m src.train` as its entry point:
 
 ```bash
 docker buildx build --platform linux/amd64 -t pfn-train .
-docker run --rm --gpus all -v "$PWD/outputs:/app/outputs" pfn-train \
-    --config configs/gp_hyperprior.yaml training.epochs=50 --output_dir outputs/run1
+docker run --rm --gpus all \
+    -v "$PWD/configs:/app/configs:ro" -v "$PWD/benchmarks:/app/benchmarks:ro" -v "$PWD/outputs:/app/outputs" \
+    pfn-train --config configs/gp_hyperprior.yaml training.epochs=50 --output_dir outputs/run1
 ```
 
-`configs/` is part of the image. Inside the container `git_commit` in `metadata.yaml` is `null`, because
-the image contains no `.git` folder.
+The image contains only the code and its dependencies. `configs/` and `benchmarks/` are mounted from the host
+(read-only), so edited configs need no rebuild; they must exist on the machine that runs the container (e.g. a
+repository checkout). A missing host folder is mounted as an empty folder, so the container sees no configs.
+Inside the container `git_commit` in `metadata.yaml` is `null`, because the image contains no `.git` folder.

@@ -44,6 +44,8 @@ training:
   device: null  # device for the model; null = default device (CUDA, MPS, then CPU)
   checkpoint_every: null  # save checkpoints/model_epoch_XXXX.pt every n epochs; null = epochs (only model.pt)
   tensorboard: true  # write TensorBoard logs to <output_dir>/tensorboard
+  gp_benchmark: benchmarks/gp_benchmark_v1.npz  # exact-GP benchmark logged during training; null = none
+  gp_benchmark_every: 5  # evaluate gp_benchmark every n epochs and after the last; null = only after the last
 
 optim:
   lr: 0.0003  # null = get_openai_lr(model)

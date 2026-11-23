@@ -16,6 +16,8 @@ The run folder `--output_dir` (required) contains `config.yaml` (resolved config
 `metadata.yaml` (git commit, library versions, final losses), `model.pt` (see `load_checkpoint`) and
 `tensorboard/` (view with `tensorboard --logdir outputs`; disable with `training.tensorboard=false`).
 With `training.checkpoint_every=n`, `checkpoints/model_epoch_XXXX.pt` is also written every n epochs (same format).
+With `training.gp_benchmark=FILE`, the exact-GP benchmark (`src/gp_benchmark.py`) is evaluated every
+`training.gp_benchmark_every` epochs and after the last one, and logged to TensorBoard.
 """
 import argparse
 import datetime
@@ -30,7 +32,7 @@ import torch
 import yaml
 from torch import nn
 
-from src import prior
+from src import gp_benchmark, prior
 from src.config import TrainConfig, config_from_dict, config_to_dict, load_config, save_config
 from src.transformer import GaussianTransformerModel
 from src.utils import (
@@ -88,7 +90,8 @@ def train(
         after every `config.training.checkpoint_every` epochs except the last one (the returned model is final)
     :param epoch_fn: optional `epoch_fn(epoch, metrics)` called after every epoch, e.g. `TensorBoardLogger.log_epoch`;
         `metrics`: `loss`, `positional_losses` (list, nan = position not sampled), `lr`, `epoch_time`,
-        `data_time`, `step_time`, `forward_time` (the last three: of the last batch)
+        `data_time`, `step_time`, `forward_time` (the last three: of the last batch), and `gp_benchmark`
+        (results of `src.gp_benchmark.evaluate`) in the epochs in which `config.training.gp_benchmark` is evaluated
     :return: (mean loss of the last epoch, mean loss per single_eval_pos of the last epoch, model on CPU)
     """
     config = config or TrainConfig()
@@ -103,6 +106,14 @@ def train(
 
     device = t.device or default_device
     print(f'Using {device} device')
+
+    if t.gp_benchmark is not None:  # fail before training rather than after the first epochs
+        if not os.path.isfile(t.gp_benchmark):
+            raise FileNotFoundError(f'training.gp_benchmark: no such file: {t.gp_benchmark}')
+        benchmark_seq_len = gp_benchmark.load_benchmark(t.gp_benchmark)[0]['seq_len']
+        if t.bptt < benchmark_seq_len:
+            print(f'Warning: training.bptt={t.bptt} < {benchmark_seq_len} (gp_benchmark seq_len); the benchmark '
+                  f'contains sequences longer than those seen in training.')
 
     bptt = t.bptt
     steps_per_epoch = t.steps_per_epoch
@@ -198,10 +209,19 @@ def train(
                 f' forward time {forward_time:5.2f}')
             print('-' * 89)
 
+        metrics = {'loss': total_loss, 'positional_losses': total_positional_losses, 'lr': lr_epoch,
+                   'epoch_time': epoch_time, 'data_time': time_to_get_batch, 'step_time': step_time,
+                   'forward_time': forward_time}
+        if t.gp_benchmark is not None and (epoch % (t.gp_benchmark_every or epochs) == 0 or epoch == epochs):
+            model.eval()
+            metrics['gp_benchmark'] = gp_benchmark.evaluate(model, t.gp_benchmark)
+            model.train()
+            if verbose:
+                summary = gp_benchmark.summarize(metrics['gp_benchmark'])
+                print(f"| gp benchmark (epoch {epoch}) | kl {summary['kl']:.4f} | nll_gap {summary['nll_gap']:.4f}")
+
         if epoch_fn is not None:
-            epoch_fn(epoch, {'loss': total_loss, 'positional_losses': total_positional_losses, 'lr': lr_epoch,
-                             'epoch_time': epoch_time, 'data_time': time_to_get_batch, 'step_time': step_time,
-                             'forward_time': forward_time})
+            epoch_fn(epoch, metrics)
 
         scheduler.step()
 
@@ -267,8 +287,11 @@ class TensorBoardLogger:
         if metadata:
             self.writer.add_text('metadata', as_text(metadata))
         # Session start now and end in `close`, so running (or interrupted) runs appear in the HParams tab too;
-        # the metric column shows the latest value of the `loss/mean` scalar.
-        exp, ssi, self._sei = hparams(flatten_config(config), {'loss/mean': None})
+        # the metric columns show the latest values of these scalars.
+        metric_tags = {'loss/mean': None}
+        if config.training.gp_benchmark is not None:
+            metric_tags.update({'gp_benchmark/kl': None, 'gp_benchmark/nll_gap': None})
+        exp, ssi, self._sei = hparams(flatten_config(config), metric_tags)
         self.writer.file_writer.add_summary(exp)
         self.writer.file_writer.add_summary(ssi)
         self.writer.flush()
@@ -282,7 +305,22 @@ class TensorBoardLogger:
         w.add_scalar('optim/lr', metrics['lr'], epoch)
         for name in ('epoch_time', 'data_time', 'step_time', 'forward_time'):
             w.add_scalar(f'time/{name}', metrics[name], epoch)
+        if 'gp_benchmark' in metrics:
+            self.log_gp_benchmark(epoch, metrics['gp_benchmark'])
         w.flush()
+
+    def log_gp_benchmark(self, epoch, results):
+        """`gp_benchmark/<metric>` (all subsets), `gp_benchmark_<metric>/<subset>/<task>` and
+        `gp_benchmark_kl_by_context_size/XXXX` (averaged over subsets) for `kl` and `nll_gap`."""
+        w = self.writer
+        for metric, value in gp_benchmark.summarize(results).items():
+            w.add_scalar(f'gp_benchmark/{metric}', value, epoch)
+        for metric in ('kl', 'nll_gap'):
+            for key, r in results.items():
+                w.add_scalar(f'gp_benchmark_{metric}/{key}', r['mean'][metric], epoch)
+        for n in next(iter(results.values()))['by_context_size']:
+            kl = sum(r['by_context_size'][n]['kl'] for r in results.values()) / len(results)
+            w.add_scalar(f'gp_benchmark_kl_by_context_size/{n:04d}', kl, epoch)
 
     def close(self):
         self.writer.file_writer.add_summary(self._sei)
@@ -361,6 +399,8 @@ if __name__ == '__main__':
     # Fail before training rather than after it.
     if os.path.exists(os.path.join(args.output_dir, 'model.pt')):
         raise FileExistsError(f'{args.output_dir} already contains a model.pt; choose another --output_dir.')
+    if config.training.gp_benchmark is not None and not os.path.isfile(config.training.gp_benchmark):
+        raise FileNotFoundError(f'training.gp_benchmark: no such file: {config.training.gp_benchmark}')
 
     print('Config:\n' + yaml.safe_dump(config_to_dict(config), sort_keys=False))
     metadata = run_metadata()

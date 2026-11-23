@@ -173,6 +173,10 @@ class TrainingConfig(_Config):
     # Save an intermediate checkpoint every n epochs; None = epochs, i.e. only the final model
     checkpoint_every: PositiveInt | None = None
     tensorboard: bool = True  # write TensorBoard logs to <output_dir>/tensorboard
+    # Exact-GP benchmark file (`src/gp_benchmark.py`) evaluated during training; None = no evaluation
+    gp_benchmark: str | None = None
+    # Evaluate the benchmark every n epochs and after the last one; None = epochs, i.e. only after the last epoch
+    gp_benchmark_every: PositiveInt | None = None
 
     @model_validator(mode='after')
     def _check(self) -> Self:
